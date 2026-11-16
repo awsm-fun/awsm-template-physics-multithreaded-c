@@ -24,6 +24,7 @@ env:
   # Must equal the `wasm-bindgen` version pinned in renderer/Cargo.toml and
   # audio/Cargo.toml: the CLI refuses wasm built against any other.
   WASM_BINDGEN_VERSION: "0.2.126"
+  BINARYEN_VERSION: "123"
 
 jobs:
   build:
@@ -45,11 +46,20 @@ jobs:
         with:
           version: latest
 
-      # Prebuilt binaries of the wasm-bindgen CLI and Binaryen's wasm-opt.
-      - name: Install wasm-bindgen and wasm-opt
+      # A prebuilt binary of the wasm-bindgen CLI.
+      - name: Install wasm-bindgen
         uses: taiki-e/install-action@v2
         with:
-          tool: wasm-bindgen-cli@${{ env.WASM_BINDGEN_VERSION }},wasm-opt
+          tool: wasm-bindgen-cli@${{ env.WASM_BINDGEN_VERSION }}
+
+      # wasm-opt, from a pinned Binaryen release: the feature flags the tasks
+      # pass (taskfile/renderer.yml) need a recent one. Added to PATH after
+      # Emscripten so it is found before any older copy.
+      - name: Install Binaryen (wasm-opt)
+        run: |
+          curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+            | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
 
       - name: Install Ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build

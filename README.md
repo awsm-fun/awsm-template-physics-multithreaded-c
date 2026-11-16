@@ -99,8 +99,9 @@ produces a wasm file of about 5 MB, and the much smaller audio module. After
 that they are only rebuilt when you ask for it, so everyday iteration never
 recompiles Rust.
 
-Only macOS with Chrome has been tested. Other platforms and browsers with
-WebGPU may work, but have not been tried.
+Development has been on macOS with Chrome. The checks and the release build
+also run on Ubuntu in CI (`.github/workflows/`), which doubles as a recipe for
+setting up Linux; other browsers with WebGPU have not been tried.
 
 ## How it fits together
 
@@ -616,8 +617,8 @@ What the renderer can drive and report:
 
 ## Limitations and next steps
 
-* **Tested only on macOS with Chrome.** The install hints are Homebrew
-  commands; other systems need their own equivalents.
+* **Tested on macOS with Chrome.** CI builds and tests on Ubuntu, but the
+  install hints are Homebrew commands and other browsers are untried.
 * **The renderer handles a subset of scenes.** See the list above: skinned and
   cluster-LOD meshes cannot be bound or spawned, and ellipsoid and convex-hull
   colliders are not reported.
