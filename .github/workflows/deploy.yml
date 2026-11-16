@@ -1,0 +1,98 @@
+name: Deploy to GitHub Pages
+
+# Builds the release site and publishes dist/ to GitHub Pages on every merge
+# to main. Pages cannot send the COOP/COEP headers shared memory needs, so the
+# build includes the coi-serviceworker shim, which adds them in the browser.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Pages deploy needs an OIDC token + write access to the Pages environment.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let an in-flight deploy finish rather than cancel it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must equal the `wasm-bindgen` version pinned in renderer/Cargo.toml and
+  # audio/Cargo.toml: the CLI refuses wasm built against any other.
+  WASM_BINDGEN_VERSION: "0.2.126"
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      # app/vendored/box3d is a git submodule.
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      # Prebuilt binaries of the wasm-bindgen CLI and Binaryen's wasm-opt.
+      - name: Install wasm-bindgen and wasm-opt
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@${{ env.WASM_BINDGEN_VERSION }},wasm-opt
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            renderer
+            audio
+          cache-on-failure: true
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      # Every URL in the site is relative, so the same build works under the
+      # "/<repo>/" path Pages serves project sites from.
+      - name: Build
+        run: task build
+
+      # Stop Pages' Jekyll from touching the output.
+      - name: Disable Jekyll
+        run: touch dist/.nojekyll
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

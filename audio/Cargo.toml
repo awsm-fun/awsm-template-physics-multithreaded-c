@@ -1,0 +1,80 @@
+# The page's sound: plays the awsm-audio project in media/audio/ and turns the
+# app's cues (rolling, impacts, camera heading) into live WebAudio changes.
+#
+# WebAudio exists only on the main thread, so unlike the renderer this module
+# is not a worker: dom/main.js imports it directly and calls the small `Audio`
+# class it exports (see src/lib.rs).
+#
+# This is a standalone crate, not a workspace member: it is built with plain
+# `cargo build` on stable Rust, then post-processed by the wasm-bindgen CLI
+# (see ../taskfile/audio.yml).
+[package]
+name = "audio"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+# A cdylib is what wasm-bindgen consumes: one self-contained .wasm.
+crate-type = ["cdylib"]
+
+[dependencies]
+# ── The awsm-audio runtime ───────────────────────────────────────────────────
+#   awsm-audio-player  plays a saved awsm-audio project live on one
+#                      AudioContext: a looping instance plus any number of
+#                      concurrent one-shot voices
+#   awsm-audio-schema  the project's data model (samples, graphs, assets)
+awsm-audio-player = "2.5"
+awsm-audio-schema = "2.5"
+
+# Parses the exported `project.toml` (the schema crate only derives serde).
+# Only the parser is needed; the writer half stays out of the module.
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
+serde = { version = "1", features = ["derive"] }
+
+# Fetches project.toml and the worklet .wasm files concurrently.
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
+gloo-net = { version = "0.7", default-features = false, features = ["http"] }
+
+# ── wasm-bindgen ─────────────────────────────────────────────────────────────
+# The same pinned set as renderer/Cargo.toml, for the same reason: these four
+# are released together, the `-sys` crates pin their wasm-bindgen exactly, and
+# wasm-bindgen itself must match the installed `wasm-bindgen` CLI version
+# exactly. Upgrade both crates together, and the CLI with them.
+wasm-bindgen = "=0.2.126"
+wasm-bindgen-futures = "=0.4.76"
+js-sys = "=0.3.103"
+
+# ── logging to the browser console ───────────────────────────────────────────
+# The same setup as the renderer, so this crate's messages and the player's
+# own warnings land in the console in the same format.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }
+tracing-web = "0.1"
+
+[dependencies.web-sys]
+version = "=0.3.103"
+features = [
+    "console",
+    "RequestCache",
+]
+
+# Optimize the dependencies even in a debug build. The player builds a WebAudio
+# graph on every impact, and at opt-level 0 that takes tens of milliseconds on
+# the main thread, which shows up as input lag. Nothing here builds a debug
+# variant today; this keeps one usable if you add it (`cargo build`).
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+# wasm-bindgen drops DWARF sections, and browser stack traces come from the
+# wasm name section instead, so generating debug info would only slow linking.
+debug = false
+
+# `task audio:release`. Size-optimized with whole-program LTO: the page
+# downloads this module on every cold visit, alongside the two workers.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1

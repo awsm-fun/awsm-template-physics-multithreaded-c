@@ -1,0 +1,42 @@
+# The dev server and the file watchers. Started together by the root `dev`
+# task; `server` is also usable on its own to serve whatever is in dist/.
+#
+# How a change reaches the page: a watcher rebuilds one part, the build task
+# writes its dist/<name>.stamp last, the server sees the stamp change and
+# tells the page (app.stamp → swap the app worker; others → reload).
+version: '3'
+
+tasks:
+  server:
+    desc: 'Serve dist/ at http://127.0.0.1:{{.PORT}} with COOP/COEP headers and live reload (no build)'
+    dir: '{{.ROOT_DIR}}'
+    preconditions:
+      - sh: command -v node
+        msg: 'node not found. Install it with: brew install node'
+    cmds:
+      - node tools/dev-server.mjs --root dist --port {{.PORT}} --reload={{.RELOAD}} {{.OPEN}}
+
+  watch:
+    internal: true
+    failfast: true # if one piece dies (e.g. the port is taken), stop them all
+    deps: [server, watch-app, watch-dom]
+
+  # --postpone: the dev task has just built everything, so wait for a change.
+  # --on-busy-update=queue: a save that lands while a build is running starts
+  # one more build afterwards (by default watchexec would ignore it, and the
+  # page would be left showing the older code).
+  watch-app:
+    internal: true
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - >-
+        watchexec --postpone --on-busy-update=queue
+        --watch app/src --watch app/web --watch app/cmake
+        --watch app/CMakeLists.txt --watch app/CMakePresets.json
+        -- task app:dev
+
+  watch-dom:
+    internal: true
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - watchexec --postpone --on-busy-update=queue --watch dom -- task dom:build

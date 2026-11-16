@@ -1,0 +1,20 @@
+# Build output
+dist/
+app/build/
+renderer/target/
+audio/target/
+
+# Task's checksum cache (taskfile/media.yml uses `sources`)
+.task/
+
+# Editor / OS
+.cache/
+.DS_Store
+
+# Stray native artifacts
+*.o
+*.dSYM/
+
+# Local tooling
+.claude/
+.env

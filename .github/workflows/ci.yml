@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    # Status-check name matches the sibling awsm repos.
+    name: test-ci
+    runs-on: ubuntu-latest
+    steps:
+      # app/vendored/box3d is a git submodule.
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      # Stable Rust: neither Rust module is threaded (the threads are the C
+      # app's), so there is no nightly or build-std here.
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      # Compiles the C app to wasm, and supplies the wasm-capable clang that
+      # one of the renderer's dependencies needs (see taskfile/renderer.yml).
+      - name: Install Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            renderer
+            audio
+          cache-on-failure: true
+
+      # Native debug (AddressSanitizer + UBSan), native release and wasm
+      # (tests under node) builds of the app, then check + clippy + rustfmt
+      # for both Rust modules.
+      # clang for the native builds: it is the compiler the C23 code is
+      # developed with (and Emscripten's is clang too).
+      - name: Check
+        run: task check
+        env:
+          CC: clang
+          CXX: clang++

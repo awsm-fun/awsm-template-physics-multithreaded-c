@@ -1,0 +1,31 @@
+# Static assets: the scene bundle, the audio project, and the vendored Basis
+# Universal transcoder (used by the renderer to decode the scene's KTX2
+# textures).
+#
+#   media/bundle/          → dist/bundle/          scene.toml + assets/
+#   media/audio/           → dist/audio-project/   project.toml + assets/ (awsm-audio export)
+#   renderer/vendored/basis/    → dist/vendor/basis/   basis_transcoder.{js,wasm}
+#   renderer/vendored/workers/  → dist/workers/        basis-worker.js
+version: '3'
+
+tasks:
+  build:
+    desc: Copy the scene bundle, the audio project and the Basis transcoder + worker into dist/, then dist/media.stamp
+    dir: '{{.ROOT_DIR}}'
+    # Skipped when nothing changed since the last copy (15 MB of textures).
+    sources:
+      - media/bundle/**/*
+      - media/audio/**/*
+      - renderer/vendored/basis/*
+      - renderer/vendored/workers/*
+    generates:
+      - dist/media.stamp
+    cmds:
+      - rm -rf dist/bundle dist/audio-project dist/vendor/basis dist/workers
+      - mkdir -p dist/vendor/basis dist/workers
+      - cp -R media/bundle dist/bundle
+      # Not dist/audio/: that is where `task audio:release` puts the code.
+      - cp -R media/audio dist/audio-project
+      - cp renderer/vendored/basis/basis_transcoder.js renderer/vendored/basis/basis_transcoder.wasm renderer/vendored/basis/LICENSE-basis_universal dist/vendor/basis/
+      - cp renderer/vendored/workers/basis-worker.js dist/workers/
+      - touch dist/media.stamp

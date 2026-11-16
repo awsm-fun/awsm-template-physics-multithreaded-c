@@ -1,0 +1,15 @@
+# Paths here are relative to this file (app/). Run `task setup` once so both
+# compile databases exist.
+#
+# Native files: use the debug build's compile flags.
+CompileFlags:
+  CompilationDatabase: build/debug
+
+---
+# Wasm-only files (named src/web_*) aren't in the native build, so use the
+# wasm-dev build's flags instead. CMake writes explicit --target/--sysroot
+# there, so no editor-side setup (e.g. --query-driver) is needed.
+If:
+  PathMatch: src/web_.*
+CompileFlags:
+  CompilationDatabase: build/wasm-dev

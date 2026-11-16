@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Box3D physics in C · Rust renderer · JS page</title>
+    <link rel="icon" href="data:," />
+    <!-- coi-serviceworker (`task build COI=1` replaces this line with the shim's script tag) -->
+    <link rel="stylesheet" href="style.css" />
+    <script type="module" src="main.js"></script>
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+
+    <!-- Everything drawn over the canvas. main.js fills in the text; the
+         behaviour lives in stats.js, about.js and settings.js. Hidden as a
+         whole when the page cannot start (loading.js, fatal()). -->
+    <div id="ui">
+      <div class="hud" id="hud" aria-live="off"></div>
+
+      <!-- Top right, opt-in through the Stats button (stats.js). Three parts
+           so that just the sync line can turn red. -->
+      <div class="stats" id="stats" hidden><span id="stats-head"></span><span id="stats-sync"></span><span id="stats-tail"></span></div>
+
+      <!-- Outside the canvas, so pressing them never drops a ball. -->
+      <button class="stats-btn" id="stats-btn" type="button">Stats</button>
+      <button class="about-btn" id="about-btn" type="button">About</button>
+      <button class="settings-btn" id="settings-btn" type="button">Settings</button>
+
+      <div class="about-overlay" id="about" hidden>
+        <div class="about-modal">
+          <button class="about-close" type="button" aria-label="Close" data-close>×</button>
+          <h2>Multithreaded Physics Demo</h2>
+          <p>
+            A copyable template from the
+            <a href="https://awsm.fun" target="_blank" rel="noopener">Awsm</a> project — a WebGPU
+            game skeleton running across three threads, all over one shared WebAssembly.Memory: a
+            C app that owns the whole game and steps Box3D on its own worker threads, a Rust
+            renderer, and a plain JavaScript page that takes the input and plays the sound. No
+            postMessage on any hot path, real atomics, wasm SIMD in the solver.
+          </p>
+          <ul>
+            <li>
+              Rendering:
+              <a href="https://scene.awsm.fun" target="_blank" rel="noopener">AwsmRenderer</a>
+            </li>
+            <li>
+              Audio: <a href="https://audio.awsm.fun" target="_blank" rel="noopener">AwsmAudio</a>
+            </li>
+            <li>
+              Physics:
+              <a href="https://github.com/erincatto/box3d" target="_blank" rel="noopener">Box3D</a>
+            </li>
+          </ul>
+          <p>
+            Roll the red ball with WASD, jump with Space, click the table to drop more balls (R
+            clears them) — every impact is synthesized and spatialized in real time from the
+            physics contacts. Drag with the right mouse button to orbit the camera and scroll to
+            zoom; the controls and the stereo image stay relative to your view from any angle.
+          </p>
+          <p>
+            The stats panel (the Stats button, bottom left) shows each thread live: the
+            renderer's frame rate and its GPU and CPU time per frame, the app's CPU time per
+            physics step, and whether the picture keeps in step with the simulation. Box3D runs
+            its solver on the app's thread plus up to four more (Emscripten pthreads sharing the
+            app's memory, scheduled by Box3D itself). Drop more balls and watch the physics time
+            grow.
+          </p>
+          <p class="about-repo">
+            <a
+              href="https://github.com/awsm-fun/awsm-template-physics-multithreaded-c"
+              target="_blank"
+              rel="noopener"
+              >Source on GitHub</a
+            >
+          </p>
+        </div>
+      </div>
+
+      <div class="settings-overlay" id="settings" hidden>
+        <div class="settings-modal">
+          <button class="about-close" type="button" aria-label="Close" data-close>×</button>
+          <h2>Settings</h2>
+          <div class="settings-row">
+            <label class="settings-label" id="res-label">Resolution — 100%</label>
+            <input
+              class="res-slider"
+              id="res-slider"
+              type="range"
+              min="50"
+              max="100"
+              step="5"
+              aria-label="render resolution"
+            />
+          </div>
+          <div class="settings-row">
+            <label class="settings-label">Anti-aliasing</label>
+            <select class="settings-select" id="aa-select" aria-label="anti-aliasing">
+              <option value="off">Off</option>
+              <option value="smaa">SMAA</option>
+              <option value="msaa">MSAA 4×</option>
+            </select>
+          </div>
+          <p class="settings-hint">Adjust these settings if your framerate is low.</p>
+        </div>
+      </div>
+
+      <!-- Shown when the touch-device defaults lowered the quality (settings.js). -->
+      <div class="settings-overlay" id="quality-notice" hidden>
+        <div class="settings-modal">
+          <button class="about-close" type="button" aria-label="Close" data-close>×</button>
+          <h2>Display Quality Reduced</h2>
+          <p class="notice-text">
+            Display quality was reduced to keep the frame rate up on touch devices. You can adjust
+            the resolution and anti-aliasing any time in Settings (bottom right).
+          </p>
+          <button class="notice-ok" type="button" data-close>OK</button>
+        </div>
+      </div>
+
+      <!-- While the renderer recompiles for an anti-aliasing change. It cannot
+           be dismissed; it goes away when the renderer says it is done. -->
+      <div class="settings-overlay compile-overlay" id="aa-compile" hidden>
+        <div class="settings-modal">
+          <h2>Compiling Pipelines</h2>
+          <p class="notice-text">
+            Rebuilding the render pipelines for the new anti-aliasing settings. The first switch in
+            each direction compiles shaders; after that it's cached and instant.
+          </p>
+          <p class="settings-hint" id="aa-compile-line"></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- In the static HTML so it shows the moment the page arrives, while the
+         workers are still downloading and compiling. loading.js appends the
+         progress lines and fades it out when the first frame is up. -->
+    <div id="loading">
+      <div class="orb"></div>
+      <div class="title">
+        <div><b>Awsm</b> Renderer and Audio</div>
+        <div><b>Box3D</b> Physics</div>
+        <span class="subtitle">C and wasm threads</span>
+      </div>
+      <div id="loading-log"><div>loading code… (fetching and compiling the wasm modules)</div></div>
+    </div>
+
+    <div id="error" role="alert" hidden>
+      <h2>Something went wrong</h2>
+      <pre id="error-text"></pre>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,126 @@
+# The C app (app/), including Box3D (app/vendored/box3d). Thin wrappers: all build configuration lives in
+# app/CMakeLists.txt and app/CMakePresets.json, so `cmake --preset ...` in app/
+# does exactly what these do. Build trees: app/build/<preset>.
+#
+#   debug / release   native (tests, the headless run, sanitizers in debug)
+#   wasm / wasm-dev   Emscripten: app.js + app.wasm, in the preset's build tree
+#
+# dist/app/ (what the page loads) is filled by the `release` and `dev` tasks
+# below, by copying from the tree they just built.
+version: '3'
+
+tasks:
+  # Box3D is a git submodule (app/vendored/box3d). A plain `git clone` leaves
+  # the directory empty; this fetches it the first time anything needs it.
+  vendored:
+    internal: true
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - git submodule update --init --recursive app/vendored/box3d
+    status:
+      - test -f app/vendored/box3d/CMakeLists.txt
+
+  # Configure a preset once; afterwards Ninja re-runs CMake by itself whenever
+  # CMakeLists.txt changes.
+  configure:
+    internal: true
+    dir: '{{.ROOT_DIR}}/app'
+    requires:
+      vars: [PRESET]
+    cmds:
+      - task: vendored
+      - cmake --preset {{.PRESET}}
+    status:
+      - test -f build/{{.PRESET}}/build.ninja
+
+  setup:
+    desc: Configure the debug and wasm-dev presets, so clangd gets both compile databases
+    dir: '{{.ROOT_DIR}}/app'
+    cmds:
+      - task: vendored
+      - cmake --preset debug
+      - |
+        if command -v emcc >/dev/null 2>&1; then cmake --preset wasm-dev
+        else echo "emcc not found: skipping wasm-dev (src/web_* will lack editor support)"; fi
+
+  # Builds one wasm preset and installs it as dist/app/: the two Emscripten
+  # outputs plus the worker script that loads them. Copying from the tree that
+  # was just built means dist/app/ always holds exactly that preset's output,
+  # whichever preset was there before. The stamp is written last, because the
+  # dev server tells the page to swap the app worker as soon as it changes.
+  into-dist:
+    internal: true
+    dir: '{{.ROOT_DIR}}/app'
+    requires:
+      vars: [PRESET]
+    preconditions: &emcc
+      - sh: command -v emcc
+        msg: 'emcc not found. Install it with: brew install emscripten (or emsdk), then run: task setup'
+    cmds:
+      - task: configure
+        vars: { PRESET: '{{.PRESET}}' }
+      - cmake --build --preset {{.PRESET}} --target app
+      - mkdir -p ../dist/app
+      - cp build/{{.PRESET}}/app.js build/{{.PRESET}}/app.wasm web/worker.js ../dist/app/
+      - touch ../dist/app.stamp
+
+  release:
+    desc: Optimized (-O3) wasm build, copied into dist/app/, then dist/app.stamp
+    cmds:
+      - task: into-dist
+        vars: { PRESET: wasm }
+
+  dev:
+    desc: Fast-linking debug wasm build (runtime assertions), copied into dist/app/, then dist/app.stamp
+    cmds:
+      - task: into-dist
+        vars: { PRESET: wasm-dev }
+
+  debug:
+    desc: Native debug build (AddressSanitizer + UBSan)
+    dir: '{{.ROOT_DIR}}/app'
+    cmds:
+      - task: configure
+        vars: { PRESET: debug }
+      - cmake --build --preset debug
+
+  test:
+    desc: Native debug build + the app tests
+    dir: '{{.ROOT_DIR}}/app'
+    cmds:
+      - task: debug
+      - ctest --preset debug
+
+  run:
+    desc: 'Native headless run of the app (no browser), e.g. `task app:run -- 20` for 20 seconds'
+    dir: '{{.ROOT_DIR}}/app'
+    cmds:
+      - task: debug
+      - ./build/debug/app {{.CLI_ARGS}}
+
+  check:
+    desc: 'Clean-slate configure + build + test: native debug, native release, wasm (tests under node)'
+    dir: '{{.ROOT_DIR}}/app'
+    preconditions: *emcc
+    cmds:
+      - task: vendored
+      - cmake --workflow --preset debug --fresh
+      - cmake --workflow --preset release --fresh
+      # The editor only shows native diagnostics for shared files; this catches
+      # anything that breaks only under wasm.
+      - cmake --workflow --preset wasm --fresh
+
+  fmt:
+    desc: Format the C sources with clang-format
+    dir: '{{.ROOT_DIR}}/app'
+    preconditions:
+      - sh: command -v clang-format
+        msg: 'clang-format not found. Install it with: brew install clang-format'
+    cmds:
+      - clang-format -i src/*.c src/*.h tests/*.c tests/*.h
+
+  clean:
+    desc: Delete the C build trees (app/build/)
+    dir: '{{.ROOT_DIR}}/app'
+    cmds:
+      - rm -rf build

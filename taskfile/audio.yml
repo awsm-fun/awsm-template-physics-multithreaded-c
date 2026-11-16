@@ -1,0 +1,107 @@
+# The page's sound: builds the Rust crate in audio/ into dist/audio/.
+#
+# Included from the root Taskfile under the `audio:` namespace, so the tasks
+# are `task audio:release`, `audio:check`, `audio:fmt` and `audio:clean`.
+#
+# The same pipeline as the renderer's (taskfile/renderer.yml), minus the
+# worker script: this module runs on the page itself, which imports
+# dist/audio/audio.js directly.
+#
+#   cargo build     Rust  →  audio/target/wasm32-unknown-unknown/release/audio.wasm
+#   wasm-bindgen    that  →  dist/audio/audio_bg.wasm + audio.js (its JS glue)
+#   wasm-opt        shrinks audio_bg.wasm in place
+#   stamp           touch dist/audio.stamp, which tells the dev server to reload
+#
+# The audio PROJECT (sounds, worklet modules) is data, not code: it lives in
+# media/audio/ and `task media:build` copies it to dist/audio-project/.
+version: "3"
+
+vars:
+  AUDIO_SRC: "{{.ROOT_DIR}}/audio"
+  AUDIO_OUT: "{{.ROOT_DIR}}/dist/audio"
+  AUDIO_STAMP: "{{.ROOT_DIR}}/dist/audio.stamp"
+
+  # The post-MVP wasm features stable rustc emits for wasm32-unknown-unknown,
+  # which wasm-opt must be told about. The same list, for the same reasons, as
+  # RENDERER_WASM_FEATURES in taskfile/renderer.yml; keep the two in step.
+  AUDIO_WASM_FEATURES: >-
+    --enable-bulk-memory
+    --enable-bulk-memory-opt
+    --enable-call-indirect-overlong
+    --enable-multivalue
+    --enable-mutable-globals
+    --enable-nontrapping-float-to-int
+    --enable-reference-types
+    --enable-sign-ext
+
+tasks:
+  release:
+    desc: "Audio: optimized build into dist/audio"
+    preconditions:
+      - sh: command -v wasm-opt >/dev/null
+        msg: "wasm-opt not found. It is part of Binaryen: `brew install binaryen` (macOS) or `apt install binaryen` (Linux)."
+      - sh: command -v wasm-bindgen >/dev/null
+        msg: |
+          wasm-bindgen not found. Install the CLI at exactly the version of the
+          `wasm-bindgen` crate pinned in audio/Cargo.toml (the same pin as
+          renderer/Cargo.toml), for example:
+              cargo install wasm-bindgen-cli --locked --version 0.2.126
+    cmds:
+      - task: cargo
+        vars: { ARGS: "build --release" }
+      - mkdir -p "{{.AUDIO_OUT}}"
+      # `--target web`: an ES module the page imports; its default export
+      # instantiates the wasm, and the named exports are the Rust API.
+      - >-
+        wasm-bindgen --target web --no-typescript
+        --out-name audio
+        --out-dir "{{.AUDIO_OUT}}"
+        "{{.AUDIO_SRC}}/target/wasm32-unknown-unknown/release/audio.wasm"
+      # -Os like the crate's own release profile: the page downloads this on
+      # every cold visit, and the per-cue work it does is small.
+      - >-
+        wasm-opt -Os {{.AUDIO_WASM_FEATURES}}
+        "{{.AUDIO_OUT}}/audio_bg.wasm"
+        -o "{{.AUDIO_OUT}}/audio_bg.wasm"
+      # Last on purpose: the dev server watches the stamp, and must only
+      # reload the page once every file of the build is in place.
+      - date > "{{.AUDIO_STAMP}}"
+
+  check:
+    desc: "Audio: cargo check, clippy with warnings as errors, and a formatting check"
+    dir: "{{.AUDIO_SRC}}"
+    cmds:
+      - task: cargo
+        vars: { ARGS: "check" }
+      - task: cargo
+        vars: { ARGS: "clippy -- -D warnings" }
+      - cargo fmt --check
+
+  fmt:
+    desc: "Audio: format the Rust sources"
+    dir: "{{.AUDIO_SRC}}"
+    cmds:
+      - cargo fmt
+
+  clean:
+    desc: "Audio: remove cargo's target directory and the built files in dist"
+    cmds:
+      - rm -rf "{{.AUDIO_SRC}}/target" "{{.AUDIO_OUT}}" "{{.AUDIO_STAMP}}"
+
+  # ── building blocks ────────────────────────────────────────────────────────
+
+  # Runs `cargo {{.ARGS}}` in audio/. Unlike the renderer, nothing here
+  # compiles C, so no wasm-capable clang is needed, and no dependency uses
+  # web-sys's unstable APIs, so no `--cfg` either.
+  cargo:
+    internal: true
+    dir: "{{.AUDIO_SRC}}"
+    requires:
+      vars: [ARGS]
+    cmds:
+      # CARGO_TARGET_DIR: the release task reads cargo's output from
+      # audio/target; pin it there even if the caller redirects cargo's
+      # target directory globally.
+      - >-
+        CARGO_TARGET_DIR="{{.AUDIO_SRC}}/target"
+        cargo {{.ARGS}}
