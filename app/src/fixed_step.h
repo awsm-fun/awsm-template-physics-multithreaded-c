@@ -21,6 +21,12 @@ typedef struct fixed_step {
 // bought, and returns how many it ran. `now_ms` is any monotonic clock in
 // milliseconds. The first call only starts the clock.
 //
+// Before each step it sets `app->step_time_ms` to the moment that step
+// stands for on the same clock: `now_ms` minus the time left over after it.
+// So the newest step of a burst stands for `now_ms - leftover`, which is what
+// lets the renderer interpolate to an exact moment (see bridge.h, "Frame
+// pacing").
+//
 // Two limits keep a slow moment from snowballing (the "spiral of death",
 // where catching up takes so long that there is even more to catch up next
 // time): a single gap longer than 100 ms (a background tab, a debugger

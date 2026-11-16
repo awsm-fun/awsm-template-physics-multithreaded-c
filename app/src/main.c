@@ -1,14 +1,15 @@
 // main.c — native entry point: a headless run, no browser involved.
 //
-// It drives the app exactly the way the browser does (frame wake-ups feeding
-// the fixed-step clock), with headless.c standing in for the renderer and the
-// page. Handy as a quick sanity check, under a debugger, or with sanitizers:
+// It drives the app exactly the way the browser does (frame times feeding the
+// fixed-step clock, input batched per page frame), with headless.c standing
+// in for the renderer and the page. Handy as a quick sanity check, under a debugger, or with sanitizers:
 //
 //   ./app/build/debug/app        # 5 simulated seconds
 //   ./app/build/debug/app 20     # 20 simulated seconds
 //
 // The browser entry point is web_main.c.
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -65,10 +66,15 @@ int main(int argc, char *argv[]) {
             jumped = true;
         }
 
-        // What the renderer does once per presented frame, then what the app
-        // loop in web_main.c does when it wakes.
-        bridge_signal_frame(bridge);
+        // What the page does at the end of its frame, what the renderer does
+        // at the start of its frame, then what the app loop in web_main.c
+        // does when it wakes. (This frame's input is not old enough for this
+        // frame's burst; it goes in the next one, as in the browser.)
+        uint32_t now_us = (uint32_t)llround(now * 1000.0);
+        headless_frame_mark(bridge, now_us);
+        bridge_signal_frame_at(bridge, now_us);
         tick = bridge_wait_frame(bridge, tick);
+        app_frame_input(&app, now_us, FRAME_MS);
         steps += fixed_step_advance(&clock_state, &app, now);
         headless_drain(bridge, &outbox);
     }

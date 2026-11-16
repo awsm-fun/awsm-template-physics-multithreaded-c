@@ -23,6 +23,8 @@ void headless_click(bridge_header *bridge, float ndc_x, float ndc_y); // left mo
 void headless_right_drag(bridge_header *bridge, float dx_px, float dy_px);
 // A finger swiping (dx, dy) CSS pixels at a steady speed over `duration_ms`.
 void headless_swipe(bridge_header *bridge, float dx_px, float dy_px, uint32_t duration_ms);
+// The end of a page frame: a FRAME_MARK at `time_us` on the frame clock.
+void headless_frame_mark(bridge_header *bridge, uint32_t time_us);
 
 // Counts of what the app sent out, collected by headless_drain().
 enum { HEADLESS_CUE_KINDS = 8 };

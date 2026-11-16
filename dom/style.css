@@ -67,9 +67,9 @@ body {
   backdrop-filter: blur(4px);
 }
 
-/* The sync line turns red when the picture is persistently out of step with
-   the simulation (see stats.js for exactly when). */
-.stats .sync-bad {
+/* The app-late line turns red when the app keeps missing frames (see
+   stats.js for exactly when). */
+.stats .stats-bad {
   color: #ff6a5e;
   font-weight: 700;
 }

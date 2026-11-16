@@ -21,34 +21,20 @@ pub const STARTUP: bridge::Camera = bridge::Camera {
     far: 400.0,
 };
 
-/// The camera at a display position between two snapshots.
+/// The camera to draw with, from the two snapshots a frame shows: the newer
+/// one's, whole, not interpolated (see the comment where it is called), or
+/// the older one's if the newer carries no usable camera.
 ///
 /// Returns `None` when neither snapshot carries a usable camera (the app has
 /// not published one yet); the caller then keeps the camera it already has.
-pub fn between(
+pub fn newest_usable(
     older: Option<&bridge::Camera>,
     newer: Option<&bridge::Camera>,
-    alpha: f32,
 ) -> Option<bridge::Camera> {
-    match (
-        older.filter(|c| is_usable(c)),
-        newer.filter(|c| is_usable(c)),
-    ) {
-        (Some(a), Some(b)) => Some(bridge::Camera {
-            eye: lerp3(a.eye, b.eye, alpha),
-            target: lerp3(a.target, b.target, alpha),
-            up: lerp3(a.up, b.up, alpha),
-            fov_y: lerp(a.fov_y, b.fov_y, alpha),
-            near: lerp(a.near, b.near, alpha),
-            far: lerp(a.far, b.far, alpha),
-        })
-        // Blending two valid cameras can still land on a degenerate one (an
-        // `up` that flipped between the two steps passes through zero).
-        .filter(is_usable)
-        .or(Some(*a)),
-        (Some(only), None) | (None, Some(only)) => Some(*only),
-        (None, None) => None,
-    }
+    newer
+        .filter(|camera| is_usable(camera))
+        .or(older.filter(|camera| is_usable(camera)))
+        .copied()
 }
 
 /// The two halves `AwsmRenderer::set_camera` takes: a view matrix and the
@@ -86,14 +72,4 @@ fn is_usable(camera: &bridge::Camera) -> bool {
         && camera.far > camera.near
         // The eye must look somewhere, and not straight along `up`.
         && forward.cross(up).length_squared() > 1e-12
-}
-
-fn lerp(from: f32, to: f32, alpha: f32) -> f32 {
-    from + (to - from) * alpha
-}
-
-fn lerp3(from: [f32; 3], to: [f32; 3], alpha: f32) -> [f32; 3] {
-    Vec3::from_array(from)
-        .lerp(Vec3::from_array(to), alpha)
-        .to_array()
 }

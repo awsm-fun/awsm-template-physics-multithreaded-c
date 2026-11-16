@@ -81,7 +81,32 @@ enum {
     APP_MAX_TOUCHING = 16,
     // Recent positions of a finger on the screen, for measuring a swipe.
     APP_MAX_SWIPE_SAMPLES = 64,
+    // Input records taken off the dom → app ring but not applied yet (see
+    // app_input). Twice the ring, so emptying a full ring always fits.
+    APP_INPUT_QUEUE = 2 * BRIDGE_RING_CAPACITY,
 };
+
+// Input that has waited this long (microseconds, frame clock) for its
+// FRAME_MARK is applied without it: a lost mark, or a page stalled half way
+// through a frame, should not hold back what was sent.
+constexpr uint32_t APP_MARK_TIMEOUT_US = 100'000;
+
+// The dom → app input, batched one page frame at a time (see
+// BRIDGE_EV_FRAME_MARK in bridge.h). Records are taken off the ring into
+// `queue` as they arrive; app_frame_input() releases the ones the coming
+// burst may apply, and the first step of the burst applies them.
+typedef struct app_input {
+    // app_frame_input() has been called: the browser loop. Without it (native
+    // runs and most tests) each step applies whatever is in the ring, as it
+    // always did.
+    bool framed;
+    bool seen_mark; // a FRAME_MARK has ever arrived
+    int count;      // records in queue
+    int released;   // queue[0, released) may be applied
+    // Each record's `step` field is overwritten here with the frame time at
+    // which it was taken off the ring (the page leaves it 0), for the timeout.
+    bridge_record queue[APP_INPUT_QUEUE];
+} app_input;
 
 // One thing the player's ball is touching.
 typedef struct app_touch {
@@ -104,6 +129,10 @@ typedef struct app_swipe {
 typedef struct app_state {
     bridge_header *bridge;
     uint32_t step; // the last step published; the first is 1
+    // The moment the current step stands for, in milliseconds on the clock
+    // fixed_step_advance() was given. Published with the step, as frame-clock
+    // microseconds (bridge_snapshot_header.time_us).
+    double step_time_ms;
 
     app_scene scene;
     orbit_camera camera;
@@ -126,6 +155,15 @@ typedef struct app_state {
     uint32_t last_wall_cue_step;
     uint32_t last_ball_cue_step;
 
+    // ── Input ──
+    app_input input;
+    // Keys held, by BRIDGE_KEY_* bit, as the EV_KEY records applied so far
+    // say. `keys_tapped` also has every key that went down in this step's
+    // input, even if it came back up in the same batch: a tap shorter than a
+    // frame still moves the ball for a step.
+    uint32_t keys_down[2];
+    uint32_t keys_tapped[2];
+
     // ── Pointer gestures in progress ──
     bool orbiting; // the right mouse button is held: moves orbit the camera
     app_swipe swipe;
@@ -144,8 +182,20 @@ void app_init(app_state *app, bridge_header *bridge, uint32_t solver_threads);
 void app_destroy(app_state *app);
 
 // Advances the world by one fixed step of `dt` seconds and publishes the
-// result as a snapshot.
+// result as a snapshot. The first step after app_frame_input() applies the
+// input it released.
 void app_step(app_state *app, float dt);
+
+// Called once per frame, before that frame's steps, with the frame's time on
+// the frame clock and the display's frame period. Takes new input off the
+// ring and releases what this frame's burst should apply: everything up to
+// the newest FRAME_MARK at or before `frame_time_us - period / 2`. Records
+// after it wait for a later frame; released records a burst of zero steps
+// did not get to wait for the next step that runs.
+void app_frame_input(app_state *app, uint32_t frame_time_us, double period_ms);
+
+// Whether key `key` (BRIDGE_KEY_*) counts as held in the current step.
+bool app_key_held(const app_state *app, uint32_t key);
 
 // Number of balls currently in play (including the player's).
 int app_active_balls(const app_state *app);

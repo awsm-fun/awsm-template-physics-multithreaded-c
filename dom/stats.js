@@ -30,14 +30,14 @@
 //                 rest of app_step). At 240 steps a second the budget is
 //                 about 4.2 ms; watch it grow as balls pile up.
 //   physics       fixed steps per second (240 when all is well).
-//   sync          whether the picture keeps in step with the simulation:
-//                 normally `ok · lag N`, where N is how many steps the
-//                 renderer's display cursor trails the newest one (it grows
-//                 to absorb uneven step publishing; see
-//                 renderer/src/cursor.rs). It turns into a red
-//                 `ROUGH ±E · lag N` only when that is genuinely failing (the
-//                 SYNC_ROUGH_* constants below); a one-off spike (a tab
-//                 switch, an anti-aliasing recompile) never trips it.
+//   app late      frames the renderer drew before the app had published the
+//                 moment they show, in the last sample and in total: the
+//                 app's burst of steps did not finish within a frame, so the
+//                 frame held the newest step and the next one catches up
+//                 (bridge.h, "Frame pacing"). 0 when all is well. The line
+//                 turns red when it happens in LATE_WINDOWS samples in a row:
+//                 a steady condition, not a one-off (a tab switch, an
+//                 anti-aliasing recompile).
 //   box3d         how many threads Box3D steps the world on, counting the
 //                 app's own (web_main.c decides, from the number of cores).
 //   balls dropped the balls on the table besides the red one.
@@ -61,14 +61,9 @@ const EMA_ALPHA = 0.35;
 // measures the stall. Either way the next window starts afresh.
 const MIN_WINDOW_MS = 200;
 const MAX_WINDOW_MS = 3000;
-// The sync line turns red when, for SYNC_ROUGH_WINDOWS windows in a row, the
-// display cursor's worst error reached SYNC_ROUGH_ERR steps while its lag was
-// at (or within a step of) its ceiling of 24: the unevenness is more than the
-// lag may absorb, and motion visibly pulses. Below the ceiling the lag still
-// has room to grow, and a single rough window is an event, not a condition.
-const SYNC_ROUGH_ERR = 3.0;
-const SYNC_ROUGH_LAG = 23.0;
-const SYNC_ROUGH_WINDOWS = 3;
+// The app-late line turns red when the app was late in this many sample
+// windows in a row.
+const LATE_WINDOWS = 3;
 // Frames that must be presented after the renderer reports `ready` before
 // anything is counted. Start-up is not steady state (the loading screen is
 // fading, caches are cold, the wasm engine is still optimizing) and those
@@ -139,7 +134,7 @@ const HEAD_WARMING = `${HEAD_MAIN}  render        warming up…\n  physics      
 export function installStats({ getBridge, getLastCue }) {
   const panel = document.getElementById('stats');
   const head = document.getElementById('stats-head');
-  const syncLine = document.getElementById('stats-sync');
+  const lateLine = document.getElementById('stats-late');
   const tail = document.getElementById('stats-tail');
   const button = document.getElementById('stats-btn');
 
@@ -157,10 +152,10 @@ export function installStats({ getBridge, getLastCue }) {
     storeBool(STATS_STORAGE_KEY, open);
   });
 
-  const show = (headText, sync = '', bad = false, tailText = '') => {
+  const show = (headText, late = '', bad = false, tailText = '') => {
     head.textContent = headText;
-    syncLine.textContent = sync;
-    syncLine.classList.toggle('sync-bad', bad);
+    lateLine.textContent = late;
+    lateLine.classList.toggle('stats-bad', bad);
     tail.textContent = tailText;
   };
   show(HEAD_STARTING);
@@ -177,7 +172,10 @@ export function installStats({ getBridge, getLastCue }) {
   // Trusted windows in a row without a single GPU sample: after a few, the
   // device evidently has no timestamp queries, and the line says so.
   let gpuEmptyWindows = 0;
-  let roughWindows = 0;
+  // Frames the app was late for: the total since counting started, and how
+  // many windows in a row had any.
+  let lateTotal = 0;
+  let lateWindows = 0;
   // Missed refreshes: in the latest window (per second), and the running
   // total. The total is kept signed: a sample that lands between the
   // renderer's two counter writes counts one frame early or late, and the
@@ -202,7 +200,8 @@ export function installStats({ getBridge, getLastCue }) {
       baseline = null;
       fpsEma = stepsEma = frameWorkEma = stepWorkEma = gpuEma = null;
       gpuEmptyWindows = 0;
-      roughWindows = 0;
+      lateTotal = 0;
+      lateWindows = 0;
       missedRate = null;
       missedTotal = 0;
       warmFrame = null;
@@ -213,9 +212,6 @@ export function installStats({ getBridge, getLastCue }) {
     }
 
     const stats = bridge.readStats();
-    // Read (which resets it) every time, also while warming up, so the
-    // start-up spike is gone before the first window that is shown.
-    const syncError = bridge.takeSyncError();
     const previous = baseline;
     baseline = { at: now, ...stats };
 
@@ -290,13 +286,12 @@ export function installStats({ getBridge, getLastCue }) {
       `  physics time  ${cpuText(stepWorkEma, 2)}\n` +
       `  physics       ${stepsEma.toFixed(0)} steps/s\n`;
 
-    const lag = stats.displayLag;
-    const roughNow = syncError >= SYNC_ROUGH_ERR && lag >= SYNC_ROUGH_LAG;
-    roughWindows = roughNow ? roughWindows + 1 : 0;
-    const bad = roughWindows >= SYNC_ROUGH_WINDOWS;
-    const sync = bad
-      ? `  sync          ROUGH ±${syncError.toFixed(1)} · lag ${lag.toFixed(0)}`
-      : `  sync          ok · lag ${lag.toFixed(0)}`;
+    const late = (stats.appLate - previous.appLate) >>> 0;
+    lateTotal += late;
+    const lateRate = late / seconds;
+    lateWindows = late > 0 ? lateWindows + 1 : 0;
+    const bad = lateWindows >= LATE_WINDOWS;
+    const lateText = `  app late      ${lateRate.toFixed(0)}/s · ${lateTotal} total`;
 
     let tailText = '';
     // 0 from an app built before the field existed: then say nothing.
@@ -310,7 +305,7 @@ export function installStats({ getBridge, getLastCue }) {
     const cue = getLastCue();
     tailText += `\nlast cue       ${cue ? `${cue.name} ${cue.intensity.toFixed(2)}` : '-'}`;
 
-    show(headText, sync, bad, tailText);
+    show(headText, lateText, bad, tailText);
   }
 
   setInterval(sample, SAMPLE_INTERVAL_MS);

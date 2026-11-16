@@ -24,7 +24,7 @@
 //
 // This file wires them to the workers, and owns the input and the sound.
 
-import { Bridge, KEY, POINTER, RECORD } from './bridge.js';
+import { Bridge, KEY, POINTER, RECORD, frameClockUs } from './bridge.js';
 import { installAbout } from './about.js';
 import { APP_NAME, fatal, loadingDone, loadingLog } from './loading.js';
 import { Settings, resetSettingsIfAsked } from './settings.js';
@@ -568,11 +568,18 @@ function main() {
 
   canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 
-  // ── Per frame: cues ──
+  // ── Per frame: the frame mark, then cues ──
 
-  function frame() {
+  function frame(timestamp) {
     const bridge = app?.bridge;
     if (bridge) {
+      // Close this frame's input (if it had any). The browser delivers a
+      // frame's input events before its animation frame callbacks, so
+      // everything sent so far belongs to this frame or an earlier one. The
+      // app applies input one page frame per burst by these marks, so that
+      // each frame it draws carries exactly one frame of input
+      // (BRIDGE_EV_FRAME_MARK in bridge.h).
+      bridge.markFrame(frameClockUs(timestamp));
       let impacts = 0;
       bridge.drain((record) => {
         if (record.type !== RECORD.CUE) return; // a record type this page does not know

@@ -236,6 +236,16 @@ uint32_t bridge_frame_tick(bridge_header *bridge) {
     return atomic_load_explicit(&bridge->frame_tick, memory_order_acquire);
 }
 
+bool bridge_frame_time(bridge_header *bridge, uint32_t *time_us) {
+    // The renderer stores the time, sets the flag, then bumps the tick (all
+    // sequentially consistent), so a reader that has seen the tick sees both.
+    if (atomic_load_explicit(&bridge->frame_time_valid, memory_order_acquire) == 0) {
+        return false;
+    }
+    *time_us = atomic_load_explicit(&bridge->frame_time_us, memory_order_acquire);
+    return true;
+}
+
 uint32_t bridge_wait_frame(bridge_header *bridge, uint32_t last) {
 #ifdef __EMSCRIPTEN__
     for (;;) {
@@ -254,6 +264,12 @@ uint32_t bridge_wait_frame(bridge_header *bridge, uint32_t last) {
     (void)last;
     return atomic_load_explicit(&bridge->frame_tick, memory_order_acquire);
 #endif
+}
+
+void bridge_signal_frame_at(bridge_header *bridge, uint32_t time_us) {
+    atomic_store_explicit(&bridge->frame_time_us, time_us, memory_order_release);
+    atomic_store_explicit(&bridge->frame_time_valid, 1u, memory_order_release);
+    bridge_signal_frame(bridge);
 }
 
 void bridge_signal_frame(bridge_header *bridge) {

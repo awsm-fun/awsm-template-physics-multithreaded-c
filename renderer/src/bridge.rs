@@ -94,6 +94,13 @@ mod header {
     /// build and is ignored.
     pub const READ_SIZE: u32 = 96;
 
+    /// Written by the renderer at the start of each frame (bridge.h, "Frame
+    /// pacing"). They took the place of `reserved1` words, so every header
+    /// has room for them; [`FRAME_TIME_END`] is checked anyway.
+    pub const FRAME_TIME_US: u32 = 96;
+    pub const FRAME_TIME_VALID: u32 = 100;
+    pub const FRAME_TIME_END: u32 = 104;
+
     /// `BRIDGE_RING_RENDERER_TO_APP` / `BRIDGE_RING_APP_TO_RENDERER`.
     pub const RING_RENDERER_TO_APP: u32 = 1;
     pub const RING_APP_TO_RENDERER: u32 = 2;
@@ -105,13 +112,20 @@ mod stats {
     pub const FRAME_WORK_US: u32 = 12;
     pub const GPU_FRAME_US: u32 = 16;
     pub const GPU_FRAME_COUNT: u32 = 20;
-    pub const SYNC_ERROR_MAX: u32 = 24;
-    pub const DISPLAY_LAG: u32 = 28;
     pub const FRAME_SPAN_US: u32 = 36;
+    pub const APP_LATE: u32 = 40;
     /// End of the last field above. (The section has been 64 bytes from the
     /// start, so even an app built before the later fields existed has room
     /// for them: they were `reserved` words it never touches.)
-    pub const READ_SIZE: u32 = 40;
+    pub const READ_SIZE: u32 = 44;
+}
+
+/// Word offsets inside `bridge_snapshot_header` of the fields read in place
+/// (without copying the snapshot) to find which steps to draw between.
+mod snapshot_word {
+    pub const VERSION: u32 = 0;
+    pub const STEP: u32 = 1;
+    pub const TIME_US: u32 = 3;
 }
 
 /// Byte offsets inside `bridge_ring` (the header in front of a ring's records).
@@ -156,7 +170,7 @@ struct SnapshotHeader {
     version: u32,
     step: u32,
     pose_count: u32,
-    reserved: u32,
+    time_us: u32,
     camera: Camera,
 }
 
@@ -326,9 +340,11 @@ pub struct Bridge {
     frame_work_us: u32,
     gpu_frame_us: u32,
     gpu_frame_count: u32,
-    sync_error_max: u32,
-    display_lag: u32,
     frame_span_us: u32,
+    app_late: u32,
+    /// Word indices of `frame_time_us` and `frame_time_valid`.
+    frame_time_us: u32,
+    frame_time_valid: u32,
 
     snapshots: SnapshotRing,
     to_app: Ring,
@@ -455,7 +471,7 @@ impl Bridge {
         let total_size = field(header::TOTAL_SIZE);
         let header_size = field(header::HEADER_SIZE);
         let total = u64::from(total_size);
-        if header_size < header::READ_SIZE
+        if header_size < header::FRAME_TIME_END
             || total_size < header_size
             || !total_size.is_multiple_of(4)
             || block_start + total > memory_size
@@ -588,9 +604,10 @@ impl Bridge {
             frame_work_us: (stats_offset + stats::FRAME_WORK_US) / 4,
             gpu_frame_us: (stats_offset + stats::GPU_FRAME_US) / 4,
             gpu_frame_count: (stats_offset + stats::GPU_FRAME_COUNT) / 4,
-            sync_error_max: (stats_offset + stats::SYNC_ERROR_MAX) / 4,
-            display_lag: (stats_offset + stats::DISPLAY_LAG) / 4,
             frame_span_us: (stats_offset + stats::FRAME_SPAN_US) / 4,
+            app_late: (stats_offset + stats::APP_LATE) / 4,
+            frame_time_us: header::FRAME_TIME_US / 4,
+            frame_time_valid: header::FRAME_TIME_VALID / 4,
             snapshots,
             to_app,
             from_app,
@@ -607,45 +624,110 @@ impl Bridge {
         self.snapshots.layout.pose_capacity as usize
     }
 
-    /// How many steps of history the snapshot ring keeps.
-    pub fn snapshot_count(&self) -> u32 {
-        self.snapshots.count
-    }
-
     /// Step index of the newest snapshot the app has finished publishing.
     pub fn latest_step(&self) -> u32 {
         load(&self.words, self.latest_step)
     }
 
-    /// Copies out the snapshots around `display_step`, a fractional step index
-    /// that should not be ahead of [`Self::latest_step`].
+    /// Copies out the snapshots to draw for the moment `display_us` on the
+    /// frame clock (bridge.h, "Frame pacing"): the two consecutive steps whose
+    /// times are around it, and how far between them it lies. Also says
+    /// whether the app was late, i.e. had not yet published a step at or past
+    /// that moment.
     ///
-    /// The normal result is the pair of steps that straddle the position. When
-    /// that pair cannot be had — the position is at the very newest step, or
-    /// the wanted steps have already been overwritten after a long stall — the
-    /// newest snapshot is returned on its own, so the caller holds a real pose
-    /// for a frame instead of showing garbage.
-    pub fn sample(&mut self, display_step: f64) -> Sample<'_> {
+    /// The newest snapshot is returned on its own (alpha 0) when there is no
+    /// pair to interpolate: the app is late (it is held until the app catches
+    /// up), `display_us` is `None` (the first frame after attaching), the app
+    /// predates step times, or the steps wanted were overwritten after a long
+    /// stall.
+    pub fn sample_at(&mut self, display_us: Option<u32>) -> (Sample<'_>, bool) {
         let latest = self.latest_step();
-        let whole = display_step.floor().max(0.0);
-        let base = whole as u32;
-        let fraction = (display_step - whole).clamp(0.0, 1.0) as f32;
+        let (older, newer, alpha, late) = match display_us {
+            Some(display_us) if latest != 0 => self.bracket(latest, display_us),
+            _ => (latest, None, 0.0, false),
+        };
 
-        let mut older = self.fetch(base, None);
-        let newer = match older {
-            Some(held) if base != latest => self.fetch(base.wrapping_add(1), Some(held)),
+        let mut older_copy = self.fetch(older, None);
+        let mut newer_copy = match (older_copy, newer) {
+            (Some(held), Some(step)) => self.fetch(step, Some(held)),
             _ => None,
         };
-        if older.is_none() {
-            older = self.fetch(latest, None);
+        if older_copy.is_none() || (newer.is_some() && newer_copy.is_none()) {
+            // The pair could not be read: hold the newest step instead.
+            older_copy = self.fetch(latest, None);
+            newer_copy = None;
         }
 
         let snapshots = &self.snapshots;
-        Sample {
-            older: older.map(|index| snapshots.view(index)),
-            newer: newer.map(|index| snapshots.view(index)),
-            alpha: if newer.is_some() { fraction } else { 0.0 },
+        (
+            Sample {
+                older: older_copy.map(|index| snapshots.view(index)),
+                newer: newer_copy.map(|index| snapshots.view(index)),
+                alpha: if newer_copy.is_some() { alpha } else { 0.0 },
+            },
+            late,
+        )
+    }
+
+    /// Finds the steps around `display_us`, reading only the times in the
+    /// snapshot headers (no copies). Returns (older step, newer step, alpha,
+    /// late).
+    fn bracket(&self, latest: u32, display_us: u32) -> (u32, Option<u32>, f32, bool) {
+        let hold = (latest, None, 0.0, false);
+        let Some(latest_time) = self.step_time(latest) else {
+            return hold;
+        };
+        if latest_time == 0 {
+            return hold; // an app from before step times
         }
+        // Signed, because the frame clock wraps.
+        let after = |time: u32| time.wrapping_sub(display_us) as i32 > 0;
+        if !after(latest_time) {
+            // The app has not published that far yet.
+            return (latest, None, 0.0, true);
+        }
+        // Walk back to the newest step at or before the moment. While this
+        // runs the app may be writing its next burst, which only ever adds
+        // steps after `latest`; the ring holds enough that the steps wanted
+        // here are not overwritten (fixed_step.c).
+        let mut newer = latest;
+        let mut newer_time = latest_time;
+        for _ in 1..self.snapshots.count {
+            let step = newer.wrapping_sub(1);
+            let Some(time) = self.step_time(step) else {
+                break;
+            };
+            if !after(time) {
+                let span = newer_time.wrapping_sub(time) as f32;
+                let into = display_us.wrapping_sub(time) as f32;
+                let alpha = if span > 0.0 {
+                    (into / span).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                return (step, Some(newer), alpha, false);
+            }
+            newer = step;
+            newer_time = time;
+        }
+        hold
+    }
+
+    /// The `time_us` of the snapshot holding `step`, read in place under its
+    /// seqlock. `None` if that entry is being written or holds another step.
+    fn step_time(&self, step: u32) -> Option<u32> {
+        let ring = &self.snapshots;
+        let first = ring.first_word + (step & (ring.count - 1)) * ring.stride_words;
+        let before = load(&self.words, first + snapshot_word::VERSION);
+        if before & 1 != 0 {
+            return None;
+        }
+        let held = load(&self.words, first + snapshot_word::STEP);
+        let time = load(&self.words, first + snapshot_word::TIME_US);
+        if load(&self.words, first + snapshot_word::VERSION) != before || held != step {
+            return None;
+        }
+        Some(time)
     }
 
     /// Makes sure one of the two private buffers holds a verified copy of
@@ -742,17 +824,29 @@ impl Bridge {
         Some(bytemuck::cast(words))
     }
 
-    /// Tells the app a frame was presented: updates the renderer's stats, then
-    /// bumps the frame tick and wakes the app, which sleeps on that word
-    /// between frames. `span_us` is the time since the previous frame by the
-    /// browser's frame timestamps (0 for the first); it is added before the
-    /// frame is counted, so a page that sees the new count also sees it.
-    pub fn frame_presented(&self, work_us: u32, span_us: u32) {
+    /// Starts a frame for the app: stores the frame's time on the frame clock,
+    /// marks it valid, then bumps the frame tick and wakes the app, which
+    /// sleeps on that word between frames. Done at the START of the frame, so
+    /// the app's burst has the whole frame to run in.
+    pub fn begin_frame(&self, frame_time_us: u32) {
+        store(&self.words, self.frame_time_us, frame_time_us);
+        store(&self.words, self.frame_time_valid, 1);
+        let _ = Atomics::add(&self.words, self.frame_tick, 1);
+        let _ = Atomics::notify(&self.words, self.frame_tick);
+    }
+
+    /// Updates the renderer's stats once a frame is drawn. `span_us` is the
+    /// time since the previous frame by the browser's frame timestamps (0 for
+    /// the first); it is added before the frame is counted, so a page that
+    /// sees the new count also sees it. `late`: the frame held the newest
+    /// step because the app had not published the moment it wanted.
+    pub fn frame_presented(&self, work_us: u32, span_us: u32, late: bool) {
+        if late {
+            let _ = Atomics::add(&self.words, self.app_late, 1);
+        }
         let _ = Atomics::add(&self.words, self.frame_span_us, span_us as i32);
         let _ = Atomics::add(&self.words, self.frame_count, 1);
         let _ = Atomics::add(&self.words, self.frame_work_us, work_us as i32);
-        let _ = Atomics::add(&self.words, self.frame_tick, 1);
-        let _ = Atomics::notify(&self.words, self.frame_tick);
     }
 
     /// Publishes the renderer's GPU frame time for the page's stats panel:
@@ -762,32 +856,6 @@ impl Bridge {
     pub fn set_gpu_totals(&self, total_us: u32, frames: u32) {
         store(&self.words, self.gpu_frame_us, total_us);
         store(&self.words, self.gpu_frame_count, frames);
-    }
-
-    /// Publishes how well the display cursor kept up this frame: `error` is
-    /// its distance from where it aimed to be, `lag` how far it trails the
-    /// newest step, both in steps. The error goes into a running maximum that
-    /// the page reads and resets about once a second.
-    pub fn note_sync(&self, error: f32, lag: f32) {
-        store(&self.words, self.display_lag, lag.to_bits());
-        let error = error.abs();
-        // An atomic max, done as compare-and-swap because the page may put 0
-        // back at any moment. Non-negative floats order like their bits.
-        let mut current = load(&self.words, self.sync_error_max);
-        while error > f32::from_bits(current) {
-            let seen = Atomics::compare_exchange(
-                &self.words,
-                self.sync_error_max,
-                current as i32,
-                error.to_bits() as i32,
-            )
-            .map(|value| value as u32)
-            .unwrap_or(current);
-            if seen == current {
-                break;
-            }
-            current = seen;
-        }
     }
 }
 

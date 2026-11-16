@@ -119,6 +119,12 @@ void headless_swipe(bridge_header *bridge, float dx_px, float dy_px, uint32_t du
     push(bridge, BRIDGE_RING_DOM_TO_APP, &up);
 }
 
+void headless_frame_mark(bridge_header *bridge, uint32_t time_us) {
+    bridge_record mark = {.type = BRIDGE_EV_FRAME_MARK};
+    mark.u[0] = time_us;
+    push(bridge, BRIDGE_RING_DOM_TO_APP, &mark);
+}
+
 void headless_drain(bridge_header *bridge, headless_outbox *outbox) {
     bridge_record rec;
     bridge_ring *commands = bridge_get_ring(bridge, BRIDGE_RING_APP_TO_RENDERER);

@@ -19,6 +19,7 @@
 
 #include <emscripten/emscripten.h>
 #include <emscripten/threading.h>
+#include <math.h>
 #include <stdio.h>
 
 #include "app.h"
@@ -74,6 +75,62 @@ uintptr_t app_start(void) {
     return (uintptr_t)bridge;
 }
 
+// The frame clock (bridge.h, "Frame pacing") as this loop keeps it: a
+// running count of microseconds that never wraps, whose low 32 bits are the
+// frame-clock reading. Fed by the frame times the renderer stores with each
+// tick; with a renderer from before frame times, read from the same clock
+// directly (emscripten_get_now() is performance.timeOrigin + now() here).
+typedef struct frame_clock {
+    bool started;
+    bool from_renderer; // the latest reading came from the renderer
+    int64_t now_us;
+    uint32_t last_us; // the latest reading, as it arrived (wrapped)
+    double period_ms; // the display's frame period, estimated from the readings
+    bool period_known;
+} frame_clock;
+
+static void clock_advance_to(frame_clock *clock, uint32_t reading_us) {
+    if (!clock->started) {
+        clock->started = true;
+        clock->now_us = reading_us;
+    } else {
+        // Wrapping difference; a reading older than the last one (it cannot
+        // happen with a single renderer) does not move the clock back.
+        int32_t delta = (int32_t)(reading_us - (uint32_t)clock->now_us);
+        if (delta > 0) {
+            clock->now_us += delta;
+        }
+    }
+}
+
+static void clock_read(frame_clock *clock, bridge_header *block) {
+    uint32_t reading_us;
+    if (bridge_frame_time(block, &reading_us)) {
+        if (clock->started && clock->from_renderer) {
+            // Frame period: follows a shorter interval quickly (a faster
+            // display, or the first estimate) and a longer one only slowly,
+            // so a dropped frame does not double it.
+            double interval_ms = (double)(int32_t)(reading_us - clock->last_us) / 1000.0;
+            if (interval_ms > 0.0) {
+                if (!clock->period_known) {
+                    clock->period_ms = interval_ms;
+                    clock->period_known = true;
+                } else if (interval_ms < clock->period_ms) {
+                    clock->period_ms += (interval_ms - clock->period_ms) * 0.5;
+                } else if (interval_ms < clock->period_ms * 1.5) {
+                    clock->period_ms += (interval_ms - clock->period_ms) * 0.05;
+                }
+            }
+        }
+        clock->from_renderer = true;
+    } else {
+        reading_us = (uint32_t)llround(emscripten_get_now() * 1000.0);
+        clock->from_renderer = false;
+    }
+    clock_advance_to(clock, reading_us);
+    clock->last_us = reading_us;
+}
+
 void app_run(void) {
     if (bridge == nullptr) {
         fprintf(stderr, "app: app_run() called before app_start()\n");
@@ -81,16 +138,20 @@ void app_run(void) {
     }
     bridge_stats *stats = bridge_get_stats(bridge);
 
-    // Wake once per presented frame, then catch the simulation up to now.
-    // Pacing from the renderer keeps the steps in phase with the display: a
-    // timer of our own would drift against it and every slip would show as a
-    // stutter.
+    // Wake once per frame, at its start, then run the steps the time since
+    // the previous frame pays for. Timing them by the frame times the
+    // renderer stores, rather than by when this thread happens to wake, keeps
+    // the step count per frame steady (4, 4, 4 at 60 Hz) and lets the
+    // renderer interpolate to an exact moment (bridge.h, "Frame pacing").
+    frame_clock clock = {.period_ms = 1000.0 / 60.0};
     uint32_t tick = bridge_frame_tick(bridge);
     for (;;) {
         tick = bridge_wait_frame(bridge, tick);
 
         double start_ms = emscripten_get_now();
-        uint32_t steps = fixed_step_advance(&stepper, &app, start_ms);
+        clock_read(&clock, bridge);
+        app_frame_input(&app, (uint32_t)clock.now_us, clock.period_ms);
+        uint32_t steps = fixed_step_advance(&stepper, &app, (double)clock.now_us / 1000.0);
         if (steps > 0) {
             double work_us = (emscripten_get_now() - start_ms) * 1000.0;
             atomic_fetch_add_explicit(&stats->step_work_us, (uint32_t)(work_us + 0.5),

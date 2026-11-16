@@ -7,9 +7,13 @@
 //!   world looks like after every fixed simulation step;
 //! * this crate draws it, with `awsm-renderer`, on an `OffscreenCanvas`.
 //!
-//! The renderer holds no application state of its own. Each frame it copies
-//! the two most relevant published steps out of the shared "bridge block",
-//! interpolates between them, moves the corresponding transforms, and draws.
+//! The renderer holds no application state of its own. At the start of each
+//! frame it stores the frame's time in the shared "bridge block" and wakes the
+//! app, which runs the fixed steps that time pays for. Then it copies the two
+//! published steps around one step before the PREVIOUS frame's time,
+//! interpolates between them, moves the corresponding transforms, and draws
+//! (Fix Your Timestep, across two threads; see "Frame pacing" in
+//! `app/src/bridge.h`).
 //!
 //! It is an ordinary single-threaded wasm module. The bridge block lives in
 //! the APP's memory, which this module cannot address directly, so all access
@@ -21,12 +25,12 @@
 //! * [`render`] — start-up, the frame loop, attach / detach.
 //! * [`scene`] — loading the scene, its colliders and its addressable nodes.
 //! * [`slots`] — what each pose slot drives (bind / spawn / despawn).
-//! * [`cursor`] — which simulation time a frame shows.
 //! * [`camera`] — the app's camera, as the renderer wants it.
 //! * [`page`] — messages to the page.
 //!
 //! Besides drawing, it reports to the page's stats panel through the bridge
-//! block (frame and GPU time, how well the display keeps up with the steps)
+//! block (frame and GPU time, the time between frames, frames the app was
+//! late for)
 //! and applies the page's Settings: resolution arrives as an ordinary
 //! `resize`, anti-aliasing as `anti-alias`.
 //!
@@ -38,7 +42,6 @@
 
 mod bridge;
 mod camera;
-mod cursor;
 mod page;
 mod render;
 mod scene;

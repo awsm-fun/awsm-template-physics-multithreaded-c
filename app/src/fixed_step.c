@@ -2,8 +2,15 @@
 
 #include "fixed_step.h"
 
-constexpr double MAX_GAP_MS = 100.0;
+constexpr int MAX_GAP_WHOLE_MS = 100;
+constexpr double MAX_GAP_MS = MAX_GAP_WHOLE_MS;
 constexpr double STEP_MS = 1000.0 / (double)APP_STEP_HZ;
+
+// The renderer reads the two steps around the moment it draws while the app
+// writes its next burst into the same ring, so a burst must never reach back
+// to them: the ring has to hold the largest burst plus those two.
+static_assert(MAX_GAP_WHOLE_MS * APP_STEP_HZ / 1000 + 1 + 2 <= (int)BRIDGE_SNAPSHOT_COUNT,
+              "the snapshot ring is too short for the largest burst of steps");
 
 uint32_t fixed_step_advance(fixed_step *fs, app_state *app, double now_ms) {
     const float step_seconds = (float)(STEP_MS / 1000.0);
@@ -28,8 +35,12 @@ uint32_t fixed_step_advance(fixed_step *fs, app_state *app, double now_ms) {
 
     uint32_t steps = 0;
     while (fs->accumulator_ms >= STEP_MS && steps < max_steps) {
-        app_step(app, step_seconds);
         fs->accumulator_ms -= STEP_MS;
+        // The moment this step stands for: `now` minus the time still left
+        // over after it. Worked out from the accumulator every time, never
+        // by adding STEP_MS to the previous step's time, which would drift.
+        app->step_time_ms = now_ms - fs->accumulator_ms;
+        app_step(app, step_seconds);
         steps += 1;
     }
     if (fs->accumulator_ms >= STEP_MS) {

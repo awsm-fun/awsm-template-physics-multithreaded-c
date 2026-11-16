@@ -12,8 +12,10 @@
 //!
 //! # Commands arrive early
 //!
-//! A command is read the moment the app writes it, but the display runs a few
-//! steps behind the app (see `cursor.rs`). Acting on a command right away
+//! A command is read the moment the app writes it, but the display runs
+//! behind the app: a frame shows a moment from the app's previous burst,
+//! while the app is already writing the next (see "Frame pacing" in
+//! `app/src/bridge.h`). Acting on a command right away
 //! would show its effect before the displayed time has reached it. So every
 //! command takes effect at the app step it is stamped with: a bound or spawned
 //! object only follows poses from that step on, and a despawned one stays on

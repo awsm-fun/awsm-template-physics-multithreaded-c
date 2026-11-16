@@ -33,7 +33,6 @@ use web_sys::{DedicatedWorkerGlobalScope, GpuAdapter, OffscreenCanvas};
 
 use crate::bridge::{self, Bridge, Command, Record};
 use crate::camera;
-use crate::cursor::DisplayCursor;
 use crate::page;
 use crate::scene::{self, SceneIndex};
 use crate::slots::{self, Slots};
@@ -331,7 +330,14 @@ struct App {
     slots: Slots,
     /// The app's bridge block. `None` while no app is attached.
     bridge: Option<Bridge>,
-    cursor: DisplayCursor,
+    /// `performance.timeOrigin`: added to a frame's timestamp, it puts the
+    /// frame on the frame clock the app and the page also use (bridge.h,
+    /// "Frame pacing").
+    time_origin_ms: f64,
+    /// The frame-clock time this renderer stored for the attached app at the
+    /// start of the previous frame. This frame draws one step before it.
+    /// `None` right after attaching.
+    published_frame_us: Option<u32>,
     /// Scene records still to be handed to the app. They are queued here and
     /// moved into the ring as it has room, so a scene with more colliders than
     /// the ring holds is still described completely.
@@ -408,11 +414,12 @@ impl App {
 
         Ok(Self {
             renderer,
+            time_origin_ms: performance.time_origin(),
             performance,
             scene,
             slots: Slots::new(),
             bridge: None,
-            cursor: DisplayCursor::new(),
+            published_frame_us: None,
             outbox: VecDeque::new(),
             attach_reported: false,
             camera: camera::STARTUP,
@@ -433,6 +440,26 @@ impl App {
             if let Some(request) = pending_attach.take() {
                 self.attach(request);
             }
+        }
+
+        // The moment this frame shows: one step before the frame time stored
+        // at the start of the previous frame. The app's burst for that frame
+        // time ended on a step at or after it (`frame time - leftover`, with
+        // the leftover under one step), so the two steps around it are
+        // published by now unless the app is late. Fixed before the app is
+        // woken below, so its next burst cannot move it.
+        let mut display_us = None;
+        let mut late = false;
+        if let Some(bridge) = self.bridge.as_ref() {
+            let step_us = (1e6 / f64::from(bridge.step_hz())).round() as u32;
+            display_us = self
+                .published_frame_us
+                .map(|frame_us| frame_us.wrapping_sub(step_us));
+            // Then start the app on this frame's steps right away, so its
+            // burst has the whole frame to run in. Wrapped to 32 bits.
+            let frame_us = ((self.time_origin_ms + frame_ms) * 1000.0).round() as u64 as u32;
+            bridge.begin_frame(frame_us);
+            self.published_frame_us = Some(frame_us);
         }
 
         if let Some(bridge) = self.bridge.as_mut() {
@@ -496,21 +523,17 @@ impl App {
                 }
             }
 
-            // Decide which moment of the simulation this frame shows, and
-            // move everything there.
-            let display_step = self.cursor.advance(
-                frame_ms,
-                bridge.latest_step(),
-                bridge.step_hz(),
-                bridge.snapshot_count(),
-            );
-            bridge.note_sync(self.cursor.error() as f32, self.cursor.lag() as f32);
-            let sample = bridge.sample(display_step);
+            // Move everything to that moment: poses interpolated between the
+            // two steps around it. The camera is taken whole from the newer
+            // one: the app applies a page frame's input in the first step of
+            // a burst, and the newer step always includes it, so every frame
+            // shows exactly one page frame's turn of the camera.
+            let (sample, held) = bridge.sample_at(display_us);
+            late = held;
             self.slots.apply(&mut self.renderer, &self.scene, &sample);
-            let published_camera = camera::between(
+            let published_camera = camera::newest_usable(
                 sample.older.map(|snapshot| snapshot.camera()),
                 sample.newer.map(|snapshot| snapshot.camera()),
-                sample.alpha,
             );
             if let Some(published_camera) = published_camera {
                 self.camera = published_camera;
@@ -547,9 +570,9 @@ impl App {
             }
         }
 
-        // Wake the app for its next round of steps. This happens whether or
-        // not the frame could be drawn: a rendering problem should not also
-        // freeze the simulation.
+        // The frame's stats. (The app was already woken at the start of the
+        // frame, whether or not the frame could be drawn: a rendering problem
+        // should not also freeze the simulation.)
         if let Some(bridge) = &self.bridge {
             if let Some(gpu) = awsm_renderer::profiling::gpu_frame_timing() {
                 if self.gpu_samples_published != Some(gpu.count) {
@@ -567,6 +590,7 @@ impl App {
             bridge.frame_presented(
                 work_us.max(0.0) as u32,
                 span_us.clamp(0.0, u32::MAX as f64) as u32,
+                late,
             );
         }
         self.last_frame_ms = Some(frame_ms);
@@ -589,7 +613,8 @@ impl App {
         // it gets the scene exactly as it was loaded.
         self.slots
             .reset(&mut self.renderer, &self.scene, bridge.pose_capacity());
-        self.cursor = DisplayCursor::new();
+        // The new app has published nothing for any earlier frame time.
+        self.published_frame_us = None;
         // The new block's GPU totals start at zero; publish ours on the next
         // frame rather than waiting for the next sample.
         self.gpu_samples_published = None;

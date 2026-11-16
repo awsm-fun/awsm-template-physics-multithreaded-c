@@ -44,6 +44,7 @@ export const RECORD = Object.freeze({
   EV_POINTER_UP: 3,
   EV_POINTER_MOVE: 4,
   EV_WHEEL: 5,
+  EV_FRAME_MARK: 6,
   CUE: 48,
 });
 
@@ -58,6 +59,13 @@ export const POINTER = Object.freeze({
 // whole microseconds, wrapped to 32 bits.
 function toMicroseconds(timeMs) {
   return Math.round(timeMs * 1000) % 0x100000000;
+}
+
+// A requestAnimationFrame timestamp on the frame clock (bridge.h, "Frame
+// pacing"): performance.timeOrigin + the timestamp, in whole microseconds,
+// wrapped to 32 bits. The renderer and the app use the same clock.
+export function frameClockUs(rafMs) {
+  return Math.round((performance.timeOrigin + rafMs) * 1000) % 0x100000000;
 }
 
 // FNV-1a over the UTF-8 bytes of `name`: the same number bridge_hash() gives in C.
@@ -102,10 +110,10 @@ const STATS = {
   frameWorkUs: 12,
   gpuFrameUs: 16,
   gpuFrameCount: 20,
-  syncErrorMax: 24, // f32 bits
-  displayLag: 28, // f32 bits
+  // 24 and 28: retired (the renderer's old display cursor).
   solverThreads: 32,
   frameSpanUs: 36,
+  appLate: 40,
 };
 const RING_FIELDS = {
   head: 0,
@@ -166,6 +174,8 @@ export class Bridge {
   #recordSize;
   #ringHeaderSize;
   #record;
+  // Input has been sent since the last frame mark (see markFrame).
+  #unmarked = false;
   // Scratch for turning a float into its bit pattern for an atomic store.
   #bitsF32 = new Float32Array(1);
   #bitsU32 = new Uint32Array(this.#bitsF32.buffer);
@@ -226,12 +236,10 @@ export class Bridge {
     return this.#bitsU32[0];
   }
 
-  #bitsFloat(bits) {
-    this.#bitsU32[0] = bits;
-    return this.#bitsF32[0];
-  }
-
-  // ── Input state (continuous; the app polls it every step) ──────────────
+  // ── Input state (continuous) ────────────────────────────────────────────
+  // The app reads the pointer and the canvas size from here. The held-key
+  // bits are kept up to date for any other reader, but the app works out what
+  // is held from the key records instead, in order, one page frame at a time.
 
   setKeyHeld(key, held) {
     if (!(key > 0 && key < KEY_COUNT)) return;
@@ -307,6 +315,21 @@ export class Bridge {
     });
   }
 
+  // The end of this page frame: everything sent before it belongs to this
+  // frame or an earlier one. `timeUs` is the frame's time on the frame clock
+  // (frameClockUs). The app applies input one page frame at a time by these
+  // marks (BRIDGE_EV_FRAME_MARK in bridge.h). Only sent if this frame sent
+  // input, so an idle page never fills the ring while the app is paused (an
+  // anti-aliasing recompile stops the frames that wake it).
+  markFrame(timeUs) {
+    if (!this.#unmarked) return true;
+    const sent = this.#push(RECORD.EV_FRAME_MARK, (u) => {
+      u[0] = timeUs >>> 0;
+    });
+    if (sent) this.#unmarked = false;
+    return sent;
+  }
+
   // Producer side of the dom → app ring. `fill(u, f)` writes the payload
   // through two views of the same 14 words (u = Uint32Array, f = Float32Array).
   #push(type, fill) {
@@ -333,6 +356,7 @@ export class Bridge {
 
     // Publish: the record's words are written before the new head is visible.
     Atomics.store(this.#u32, headIndex, (head + 1) >>> 0);
+    if (type !== RECORD.EV_FRAME_MARK) this.#unmarked = true;
     return true;
   }
 
@@ -358,9 +382,9 @@ export class Bridge {
 
   // ── Reading ─────────────────────────────────────────────────────────────
 
-  // Counters for the stats panel. The counters (…Us, …Count, latestStep)
-  // wrap at 2^32; subtract with `(b - a) >>> 0`. displayLag is in steps.
-  // solverThreads is 0 from an app that predates the field.
+  // Counters for the stats panel. The counters (…Us, …Count, appLate,
+  // latestStep) wrap at 2^32; subtract with `(b - a) >>> 0`. solverThreads is
+  // 0 from an app that predates the field.
   readStats() {
     const s = this.#stats;
     const load = (byteOffset) => Atomics.load(this.#u32, Bridge.#word(s + byteOffset));
@@ -371,18 +395,10 @@ export class Bridge {
       frameWorkUs: load(STATS.frameWorkUs),
       gpuFrameUs: load(STATS.gpuFrameUs),
       gpuFrameCount: load(STATS.gpuFrameCount),
-      displayLag: this.#bitsFloat(load(STATS.displayLag)),
       solverThreads: load(STATS.solverThreads),
       frameSpanUs: load(STATS.frameSpanUs),
+      appLate: load(STATS.appLate),
       latestStep: Atomics.load(this.#u32, Bridge.#word(this.#base + HEADER.latestStep)),
     };
-  }
-
-  // The largest display-cursor error (in steps) the renderer has seen since
-  // the previous call. Reading resets it: the renderer keeps a running
-  // maximum, and this puts 0 back in the same atomic step.
-  takeSyncError() {
-    const word = Bridge.#word(this.#stats + STATS.syncErrorMax);
-    return this.#bitsFloat(Atomics.exchange(this.#u32, word, 0));
   }
 }

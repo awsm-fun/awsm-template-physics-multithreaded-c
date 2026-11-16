@@ -26,9 +26,10 @@
 //                      dom → app
 //   bridge_stats       counters for the on-page stats panel
 //   snapshot ring      the app's published world state: one snapshot per fixed
-//                      step (camera + a pose per slot), newest BRIDGE_SNAPSHOT_COUNT
-//                      steps kept. The renderer samples it at its own display
-//                      time and interpolates.
+//                      step (camera + a pose per slot, and the time the step
+//                      stands for), newest BRIDGE_SNAPSHOT_COUNT steps kept.
+//                      The renderer draws each frame between the two steps
+//                      around one moment (see "Frame pacing" below).
 //                      app → renderer
 //   4 event rings      single-producer/single-consumer queues of fixed-size
 //                      tagged records, for everything discrete:
@@ -61,6 +62,32 @@
 //     `head`, the consumer owns `tail`; both are free-running counters and the
 //     slot index is `counter & (capacity - 1)`.
 //
+// ── Frame pacing ──────────────────────────────────────────────────────────
+//
+// One clock, the "frame clock", times everything: the browser's frame
+// timestamp (performance.timeOrigin + the requestAnimationFrame time) in
+// microseconds, wrapped to 32 bits. Every thread computes it the same way, so
+// their readings compare directly. Compare two of them with a signed
+// difference, `(int32_t)(a - b)`; they wrap every 71 minutes.
+//
+//   1. At the START of each frame the renderer stores the frame's time in
+//      `frame_time_us` (and sets `frame_time_valid`), then bumps `frame_tick`.
+//   2. The app wakes on the tick and runs as many fixed steps as the time
+//      since the previous frame time pays for (Fix Your Timestep). Each
+//      snapshot carries the frame-clock time its step stands for (`time_us`):
+//      after a burst, the newest step stands for `frame_time - leftover`.
+//   3. The NEXT frame draws the moment `previous frame_time - one step`,
+//      interpolating between the two snapshots around it. That moment is
+//      fixed before the app starts its next burst, so the burst cannot move
+//      it, and it advances by exactly the time between frames: motion is
+//      even whatever the step counts per burst. If the app has not published
+//      that far yet, the renderer holds the newest snapshot and counts the
+//      frame in `app_late`.
+//   4. Input is batched per page frame: the page pushes a FRAME_MARK record
+//      after each frame's input, and the app applies, in the first step of a
+//      burst, the records up to the newest mark that is at least half a frame
+//      older than the burst's frame time (see BRIDGE_EV_FRAME_MARK).
+//
 // All values are little-endian (wasm). All offsets are in bytes from the
 // start of the block.
 
@@ -81,9 +108,10 @@
 
 // ── Sizes (the app is free to change these; readers use the section table) ─
 
-// Steps of history kept in the snapshot ring. This is the renderer's jitter
-// buffer: it displays a few steps behind the newest one so that uneven wake-ups
-// of this thread never show up as stutter. Must be a power of two.
+// Steps of history kept in the snapshot ring. The renderer reads the two steps
+// around the moment it draws while the app writes its next burst, so this
+// must exceed the largest burst (fixed_step.c) by at least two. Must be a
+// power of two.
 #define BRIDGE_SNAPSHOT_COUNT 32u
 
 // Maximum number of simultaneously posed things (one pose "slot" each).
@@ -113,9 +141,10 @@ typedef struct bridge_header {
     // the renderer converts frame time into steps with the same number.
     float step_hz; //  16
 
-    // Bumped (and notified) by the renderer once per presented frame. The app
-    // blocks on this word between frames, which keeps the simulation in phase
-    // with the display instead of beating against it.
+    // Bumped (and notified) by the renderer at the start of every frame,
+    // after it has stored `frame_time_us`. The app blocks on this word
+    // between frames, which keeps the simulation in phase with the display
+    // instead of beating against it.
     _Atomic uint32_t frame_tick; //  20
 
     // Step index of the newest fully published snapshot. Written by the app
@@ -141,7 +170,16 @@ typedef struct bridge_header {
     uint32_t ring_header_size;               //  88  bytes before a ring's first record
     uint32_t record_size;                    //  92  bytes per record
 
-    uint32_t reserved1[8]; //  96
+    // Written by the renderer at the start of each frame, before it bumps
+    // `frame_tick`: that frame's time on the frame clock (see "Frame pacing"
+    // above), in microseconds, wrapped to 32 bits.
+    _Atomic uint32_t frame_time_us; //  96
+    // Set to 1 by the renderer once it has stored a frame time, and never
+    // cleared. 0 means a renderer from before frame times: the app then keeps
+    // time itself (on the same clock).
+    _Atomic uint32_t frame_time_valid; // 100
+
+    uint32_t reserved1[6]; // 104
 } bridge_header;           // 128
 
 // ── Input state (dom → app) ────────────────────────────────────────────────
@@ -206,14 +244,11 @@ typedef struct bridge_stats {
     // without `timestamp-query`.
     _Atomic uint32_t gpu_frame_us;    // 16  total microseconds of GPU per sampled frame (wraps)
     _Atomic uint32_t gpu_frame_count; // 20  frames in gpu_frame_us (wraps)
-    // How well the renderer's display cursor keeps up with the steps (see
-    // renderer/src/cursor.rs). Both are f32 bit patterns, in steps.
-    // sync_error_max is a running maximum of the cursor's distance from where
-    // it aims to be; the page reads it and puts 0 back (an atomic exchange),
-    // so each read covers the time since the previous one. Non-negative f32
-    // bit patterns order like the numbers, so the max can be kept on the bits.
-    _Atomic uint32_t sync_error_max; // 24  f32 bits, steps
-    _Atomic uint32_t display_lag;    // 28  f32 bits, steps: how far the cursor trails latest_step
+    // Retired: written by renderers that had an adaptive "display cursor",
+    // which frame times replaced. Current renderers leave them at 0; they
+    // stay so that no later field moves (rule 1).
+    _Atomic uint32_t sync_error_max; // 24  (retired) f32 bits, steps
+    _Atomic uint32_t display_lag;    // 28  (retired) f32 bits, steps
 
     // Written by the app, once, at start-up.
     _Atomic uint32_t solver_threads; // 32  threads Box3D steps the world on, counting the app's
@@ -225,7 +260,12 @@ typedef struct bridge_stats {
     // shows the difference as missed frames.
     _Atomic uint32_t frame_span_us; // 36  total microseconds between frames (wraps)
 
-    uint32_t reserved[6]; // 40
+    // Written by the renderer: frames drawn before the app had published the
+    // moment they show, so they held the newest snapshot instead (the app was
+    // late: its burst did not finish within a frame).
+    _Atomic uint32_t app_late; // 40  frames (wraps)
+
+    uint32_t reserved[5]; // 44
 } bridge_stats;           // 64
 
 // ── Snapshot ring (app → renderer) ─────────────────────────────────────────
@@ -263,8 +303,12 @@ typedef struct bridge_snapshot_header {
     // reader that wants step N must check it still says N.
     uint32_t step; //  4
     // Slots [0, pose_count) may be active; the rest are not.
-    uint32_t pose_count;  //  8
-    uint32_t reserved;    // 12
+    uint32_t pose_count; //  8
+    // The moment this step stands for, on the frame clock (microseconds,
+    // wrapped; see "Frame pacing" above). Never 0: the app writes 1 instead
+    // of a time that wraps to exactly 0, so that 0 can keep meaning "an app
+    // from before step times" (the renderer then just draws the newest step).
+    uint32_t time_us;     // 12
     bridge_camera camera; // 16
 } bridge_snapshot_header; // 64
 
@@ -323,6 +367,20 @@ enum {
     BRIDGE_EV_POINTER_MOVE = 4,
     // The wheel turned.           f[0] = deltaY in CSS pixels (positive = towards the user)
     BRIDGE_EV_WHEEL = 5,
+    // The page finished a frame: every record before this one belongs to
+    // that frame or an earlier one. Sent only after a frame that sent input
+    // (a frame with none has nothing to close), so an idle page adds nothing
+    // to the ring, even while the app is not stepping.
+    //                             u[0] = the page frame's time on the frame
+    //                                    clock (see "Frame pacing" above)
+    // The app applies input one page frame at a time: in the first step of
+    // the burst for frame time T, it applies the records up to and including
+    // the newest mark at or before T - half a frame, and keeps the rest for a
+    // later burst. That way every burst gets exactly one page frame of input,
+    // whichever thread happens to run first. An app that sees no marks (an
+    // older page) applies everything at once, and input left waiting for a
+    // mark too long (APP_MARK_TIMEOUT_US in app.h) is applied without it.
+    BRIDGE_EV_FRAME_MARK = 6,
 
     // ── renderer → app ─────────────────────────────────────────────────────
     // Sent once per attach, after the scene is on screen. A BEGIN, then one
@@ -412,6 +470,8 @@ static_assert(offsetof(bridge_header, pose_capacity) == 64, "bridge_header.pose_
 static_assert(offsetof(bridge_header, ring_offset) == 72, "bridge_header.ring_offset");
 static_assert(offsetof(bridge_header, ring_header_size) == 88, "bridge_header.ring_header_size");
 static_assert(offsetof(bridge_header, record_size) == 92, "bridge_header.record_size");
+static_assert(offsetof(bridge_header, frame_time_us) == 96, "bridge_header.frame_time_us");
+static_assert(offsetof(bridge_header, frame_time_valid) == 100, "bridge_header.frame_time_valid");
 
 static_assert(sizeof(bridge_input) == 64, "bridge_input size");
 static_assert(offsetof(bridge_input, canvas_width) == 8, "bridge_input.canvas_width");
@@ -425,6 +485,7 @@ static_assert(offsetof(bridge_stats, sync_error_max) == 24, "bridge_stats.sync_e
 static_assert(offsetof(bridge_stats, display_lag) == 28, "bridge_stats.display_lag");
 static_assert(offsetof(bridge_stats, solver_threads) == 32, "bridge_stats.solver_threads");
 static_assert(offsetof(bridge_stats, frame_span_us) == 36, "bridge_stats.frame_span_us");
+static_assert(offsetof(bridge_stats, app_late) == 40, "bridge_stats.app_late");
 
 static_assert(sizeof(bridge_camera) == 48, "bridge_camera size");
 static_assert(sizeof(bridge_pose) == 32, "bridge_pose size");
@@ -434,6 +495,7 @@ static_assert(offsetof(bridge_pose, flags) == 28, "bridge_pose.flags");
 static_assert(sizeof(bridge_snapshot_header) == 64, "bridge_snapshot_header size");
 static_assert(offsetof(bridge_snapshot_header, step) == 4, "bridge_snapshot_header.step");
 static_assert(offsetof(bridge_snapshot_header, pose_count) == 8, "bridge_snapshot_header.pose_count");
+static_assert(offsetof(bridge_snapshot_header, time_us) == 12, "bridge_snapshot_header.time_us");
 static_assert(offsetof(bridge_snapshot_header, camera) == 16, "bridge_snapshot_header.camera");
 
 static_assert(sizeof(bridge_ring) == 64, "bridge_ring size");
@@ -535,7 +597,12 @@ float bridge_canvas_aspect(bridge_input *input);
 
 uint32_t bridge_frame_tick(bridge_header *bridge);
 
-// Sleeps until `frame_tick` differs from `last` (the renderer presented a
+// The frame time the renderer stored with the latest tick (frame clock,
+// microseconds). Returns false, leaving `*time_us` alone, if the renderer has
+// never stored one (a renderer from before frame times).
+bool bridge_frame_time(bridge_header *bridge, uint32_t *time_us);
+
+// Sleeps until `frame_tick` differs from `last` (the renderer started a
 // frame), then returns the new value. In the browser this is a real futex
 // wait, so it must only be called on a worker. Native builds have no renderer:
 // there it returns the current value immediately, without waiting.
@@ -544,5 +611,8 @@ uint32_t bridge_wait_frame(bridge_header *bridge, uint32_t last);
 // The renderer's side of the handshake: bump `frame_tick` and wake the app.
 // The real renderer does this from Rust; native tests use it as a stand-in.
 void bridge_signal_frame(bridge_header *bridge);
+
+// The same, with a frame time stored first (as the real renderer does).
+void bridge_signal_frame_at(bridge_header *bridge, uint32_t time_us);
 
 #endif // BRIDGE_H

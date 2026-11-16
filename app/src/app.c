@@ -14,7 +14,9 @@
 
 #include "app.h"
 
+#include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "physics.h"
 
@@ -425,9 +427,16 @@ static void read_scene(app_state *app) {
 
 // ── User input (dom → app) ───────────────────────────────────────────────
 //
-// Two kinds: discrete EVENTS from the ring (a key went down, a button came
-// up), handled here, and continuous STATE (which keys are held right now),
-// read with bridge_key_held() in steer_player().
+// Everything arrives as records on the dom → app ring, in the order it
+// happened: keys going down and up, pointer presses, moves and releases, the
+// wheel. Which keys are held is worked out from those records too
+// (app_key_held), rather than read from the page's live bridge_input bits,
+// so that a step sees exactly the input that has been applied, and a tap
+// shorter than a frame is not lost between two steps.
+//
+// In the browser the records are applied one page frame at a time, in the
+// first step of each burst (app_frame_input; see BRIDGE_EV_FRAME_MARK in
+// bridge.h for why).
 //
 // The pointer does different things per device:
 //   mouse   left click drops a ball; dragging with the right button orbits
@@ -538,57 +547,142 @@ static void pointer_up(app_state *app, const bridge_record *rec) {
     }
 }
 
-static void read_user_input(app_state *app) {
-    bridge_ring *ring = bridge_get_ring(app->bridge, BRIDGE_RING_DOM_TO_APP);
-    bridge_record rec;
-    while (bridge_ring_pop(ring, &rec)) {
-        switch (rec.type) {
-        case BRIDGE_EV_KEY: {
-            bool down = rec.u[1] != 0;
-            if (!down || !app->scene.ready) {
-                break;
-            }
-            if (rec.u[0] == BRIDGE_KEY_SPACE) {
-                jump(app);
-            } else if (rec.u[0] == BRIDGE_KEY_R) {
-                reset(app);
-            }
-            break;
-        }
-        case BRIDGE_EV_POINTER_DOWN:
-            pointer_down(app, &rec);
-            break;
-        case BRIDGE_EV_POINTER_MOVE:
-            pointer_move(app, &rec);
-            break;
-        case BRIDGE_EV_POINTER_UP:
-            pointer_up(app, &rec);
-            break;
-        case BRIDGE_EV_WHEEL:
-            camera_zoom(&app->camera, rec.f[0]);
-            break;
-        default:
-            break; // a record type this app does not know: skip it
-        }
+static void key_event(app_state *app, uint32_t key, bool down) {
+    if (key == BRIDGE_KEY_NONE || key >= BRIDGE_KEY_COUNT) {
+        return;
     }
+    uint32_t bit = 1u << (key % 32u);
+    if (down) {
+        app->keys_down[key / 32u] |= bit;
+        app->keys_tapped[key / 32u] |= bit;
+    } else {
+        app->keys_down[key / 32u] &= ~bit;
+    }
+    if (!down || !app->scene.ready) {
+        return;
+    }
+    if (key == BRIDGE_KEY_SPACE) {
+        jump(app);
+    } else if (key == BRIDGE_KEY_R) {
+        reset(app);
+    }
+}
+
+static void apply_input(app_state *app, const bridge_record *rec) {
+    switch (rec->type) {
+    case BRIDGE_EV_KEY:
+        key_event(app, rec->u[0], rec->u[1] != 0);
+        break;
+    case BRIDGE_EV_POINTER_DOWN:
+        pointer_down(app, rec);
+        break;
+    case BRIDGE_EV_POINTER_MOVE:
+        pointer_move(app, rec);
+        break;
+    case BRIDGE_EV_POINTER_UP:
+        pointer_up(app, rec);
+        break;
+    case BRIDGE_EV_WHEEL:
+        camera_zoom(&app->camera, rec->f[0]);
+        break;
+    default:
+        break; // a FRAME_MARK, or a record type this app does not know: skip it
+    }
+}
+
+// Takes records off the ring into the queue while there is room, noting when.
+static void pull_input(app_state *app, uint32_t frame_time_us) {
+    app_input *in = &app->input;
+    bridge_ring *ring = bridge_get_ring(app->bridge, BRIDGE_RING_DOM_TO_APP);
+    while (in->count < APP_INPUT_QUEUE && bridge_ring_pop(ring, &in->queue[in->count])) {
+        bridge_record *rec = &in->queue[in->count];
+        rec->step = frame_time_us;
+        if (rec->type == BRIDGE_EV_FRAME_MARK) {
+            in->seen_mark = true;
+        }
+        in->count += 1;
+    }
+}
+
+void app_frame_input(app_state *app, uint32_t frame_time_us, double period_ms) {
+    app_input *in = &app->input;
+    in->framed = true;
+    pull_input(app, frame_time_us);
+
+    // A page that sends no marks (an older one): apply everything now.
+    if (!in->seen_mark) {
+        in->released = in->count;
+        return;
+    }
+    // Up to and including the newest mark at or before the cutoff. Marks come
+    // in time order, so every mark after a late one is late too. Half a frame
+    // of margin makes the choice robust to how the page's frame and this one
+    // are phased: this frame's own mark is always left for the next burst,
+    // and the previous frame's is always taken.
+    uint32_t cutoff = frame_time_us - (uint32_t)llround(period_ms * 500.0);
+    for (int i = in->released; i < in->count; ++i) {
+        const bridge_record *rec = &in->queue[i];
+        if (rec->type != BRIDGE_EV_FRAME_MARK) {
+            continue;
+        }
+        if ((int32_t)(rec->u[0] - cutoff) > 0) {
+            break;
+        }
+        in->released = i + 1;
+    }
+    // Input still waiting for its mark after APP_MARK_TIMEOUT_US: apply it
+    // anyway (a lost mark, a page that stalled half way through a frame).
+    if (in->released < in->count &&
+        (int32_t)(frame_time_us - in->queue[in->released].step) > (int32_t)APP_MARK_TIMEOUT_US) {
+        in->released = in->count;
+    }
+}
+
+static void read_user_input(app_state *app) {
+    app_input *in = &app->input;
+    if (!in->framed) {
+        // No frame loop (native runs, tests): apply whatever has arrived.
+        bridge_ring *ring = bridge_get_ring(app->bridge, BRIDGE_RING_DOM_TO_APP);
+        bridge_record rec;
+        while (bridge_ring_pop(ring, &rec)) {
+            apply_input(app, &rec);
+        }
+        return;
+    }
+    if (in->released == 0) {
+        return; // a later step of the burst: its input went in the first one
+    }
+    for (int i = 0; i < in->released; ++i) {
+        apply_input(app, &in->queue[i]);
+    }
+    in->count -= in->released;
+    memmove(in->queue, in->queue + in->released, (size_t)in->count * sizeof in->queue[0]);
+    in->released = 0;
+}
+
+bool app_key_held(const app_state *app, uint32_t key) {
+    if (key >= BRIDGE_KEY_COUNT) {
+        return false;
+    }
+    uint32_t word = app->keys_down[key / 32u] | app->keys_tapped[key / 32u];
+    return ((word >> (key % 32u)) & 1u) != 0;
 }
 
 // Held direction keys push the player's ball, relative to the view: "up" is
 // always away from the camera, whatever angle it is orbiting at.
 static void steer_player(app_state *app, float dt) {
-    bridge_input *input = bridge_get_input(app->bridge);
     float x = 0.0f; // to the right on screen
     float z = 0.0f; // towards the viewer
-    if (bridge_key_held(input, BRIDGE_KEY_W) || bridge_key_held(input, BRIDGE_KEY_UP)) {
+    if (app_key_held(app, BRIDGE_KEY_W) || app_key_held(app, BRIDGE_KEY_UP)) {
         z -= 1.0f;
     }
-    if (bridge_key_held(input, BRIDGE_KEY_S) || bridge_key_held(input, BRIDGE_KEY_DOWN)) {
+    if (app_key_held(app, BRIDGE_KEY_S) || app_key_held(app, BRIDGE_KEY_DOWN)) {
         z += 1.0f;
     }
-    if (bridge_key_held(input, BRIDGE_KEY_D) || bridge_key_held(input, BRIDGE_KEY_RIGHT)) {
+    if (app_key_held(app, BRIDGE_KEY_D) || app_key_held(app, BRIDGE_KEY_RIGHT)) {
         x += 1.0f;
     }
-    if (bridge_key_held(input, BRIDGE_KEY_A) || bridge_key_held(input, BRIDGE_KEY_LEFT)) {
+    if (app_key_held(app, BRIDGE_KEY_A) || app_key_held(app, BRIDGE_KEY_LEFT)) {
         x -= 1.0f;
     }
     if (x == 0.0f && z == 0.0f) {
@@ -727,8 +821,8 @@ static void send_roll_cue(app_state *app) {
 
 static void simulate(app_state *app, float dt) {
     // ── Your game logic goes here. ──────────────────────────────────────────
-    // Everything the world needs is in `app`; read input with bridge_key_held()
-    // or in read_user_input(), talk back with send_command() / send_cue().
+    // Everything the world needs is in `app`; read input with app_key_held()
+    // or in apply_input(), talk back with send_command() / send_cue().
     steer_player(app, dt);
 
     b3World_Step(app->world, dt, SOLVER_SUB_STEPS);
@@ -760,6 +854,9 @@ static void simulate(app_state *app, float dt) {
 static void publish_snapshot(app_state *app) {
     bridge_snapshot_header *snapshot = bridge_snapshot_begin(app->bridge, app->step);
     snapshot->camera = camera_to_bridge(&app->camera);
+    // Frame-clock microseconds, wrapped; 0 is kept for "no time" (bridge.h).
+    uint32_t time_us = (uint32_t)llround(app->step_time_ms * 1000.0);
+    snapshot->time_us = time_us != 0 ? time_us : 1u;
 
     bridge_pose *poses = bridge_snapshot_poses(snapshot);
     uint32_t pose_count = 0;
@@ -801,7 +898,10 @@ static void send_camera_cue_if_turned(app_state *app) {
 // ── Public API ───────────────────────────────────────────────────────────
 
 void app_init(app_state *app, bridge_header *bridge, uint32_t solver_threads) {
-    *app = (app_state){.bridge = bridge};
+    // memset rather than assigning a compound literal: app_state is large (the
+    // input queue alone is 32 KB) and a literal would be built on the stack.
+    memset(app, 0, sizeof *app);
+    app->bridge = bridge;
     app->camera = camera_default(vec3_make(0.0f, CAMERA_TARGET_LIFT, 0.0f));
     // One world for the app's whole life. A new scene description replaces
     // its bodies, not the world, which also keeps the solver threads (owned
@@ -825,7 +925,6 @@ void app_step(app_state *app, float dt) {
 
     read_scene(app);
     read_user_input(app);
-    camera_step(&app->camera);
     // Before the scene is known there is nothing to simulate, but the
     // snapshot still goes out: it carries the camera the renderer draws with.
     if (app->scene.ready) {
@@ -833,6 +932,9 @@ void app_step(app_state *app, float dt) {
     }
     send_camera_cue_if_turned(app);
     publish_snapshot(app);
+    // A tap counts for one step only.
+    app->keys_tapped[0] = 0;
+    app->keys_tapped[1] = 0;
 }
 
 int app_active_balls(const app_state *app) {

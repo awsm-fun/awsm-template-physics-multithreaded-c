@@ -236,6 +236,16 @@ static void test_frame_tick(void) {
     CHECK(bridge_frame_tick(b) == tick + 2);
     // Natively there is no renderer to wait for: it returns at once.
     CHECK(bridge_wait_frame(b, tick) == tick + 2);
+
+    // No frame time until a renderer stores one; then always the latest.
+    uint32_t time_us = 77;
+    CHECK(!bridge_frame_time(b, &time_us));
+    CHECK(time_us == 77);
+    bridge_signal_frame_at(b, 0xFFFFFFF0u);
+    CHECK(bridge_frame_tick(b) == tick + 3);
+    CHECK(bridge_frame_time(b, &time_us) && time_us == 0xFFFFFFF0u);
+    bridge_signal_frame_at(b, 0u); // wrapped; a frame time of 0 is still valid
+    CHECK(bridge_frame_time(b, &time_us) && time_us == 0u);
     bridge_destroy(b);
 }
 

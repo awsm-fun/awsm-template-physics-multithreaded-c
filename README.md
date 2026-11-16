@@ -50,9 +50,10 @@ starts on the first key or pointer press, as browsers require.
 Over the canvas: the controls, whether sound is on and a status line (top
 left); a **Stats** panel (bottom-left button) with the display's refresh rate,
 frames per second, missed frames (refreshes that went by with no new frame:
-any steady count is visible stutter), the GPU and CPU time per frame, the app's CPU time per simulation step, steps per
-second, whether the picture keeps in step with the simulation, Box3D's thread
-count, the number of dropped balls and the last impact cue; **About** (bottom
+any steady count is visible stutter), the GPU and CPU time per frame, the
+app's CPU time per simulation step, steps per second, frames the app was late
+for (its steps did not finish within a frame), Box3D's thread count, the
+number of dropped balls and the last impact cue; **About** (bottom
 centre); and **Settings** (bottom right): the render resolution and the
 anti-aliasing (Off, SMAA, 4× MSAA). Touch devices and software GPUs start at
 lower defaults; choices are remembered in `localStorage`, and `?reset` in the
@@ -119,12 +120,12 @@ setting up Linux; other browsers with WebGPU have not been tried.
  │ bridge block, inside the app module's shared WebAssembly.Memory             │
  │ (layout: app/src/bridge.h)                                                  │
  │                                                                             │
- │  header     magic, version, step rate, frame_tick,                          │
+ │  header     magic, version, step rate, frame_tick, frame time,              │
  │             latest_step, section table                                      │
  │  input      held keys, pointer, canvas size              dom      → app     │
  │  stats      counters for the stats panel                 app, renderer → dom│
  │  snapshots  ring of 32 world states (camera + poses)     app      → renderer│
- │  ring       key / pointer / wheel events                 dom      → app     │
+ │  ring       key / pointer / wheel events, frame marks    dom      → app     │
  │  ring       scene description (colliders)                renderer → app     │
  │  ring       bind / spawn / despawn commands              app      → renderer│
  │  ring       cues (sound, UI)                             app      → dom     │
@@ -164,7 +165,6 @@ renderer/             the Rust crate (cdylib), built with cargo + wasm-bindgen +
   src/render.rs       start-up, frame loop, attach / detach
   src/scene.rs        loads the scene bundle, reports colliders, indexes drivable nodes
   src/slots.rs        what each pose slot drives (bind / spawn / despawn)
-  src/cursor.rs       which simulation time each frame shows
   web/worker.js       the worker script that loads the wasm-bindgen output
   vendored/           Basis Universal transcoder and its worker (decodes the KTX2 textures)
 dom/                  the page: index.html, main.js, bridge.js (mirror of bridge.h), style.css,
@@ -203,8 +203,8 @@ shows (`camera_ray` in `app/src/camera.c`).
 
 **Why the app worker never receives messages.** The app's loop (`app_run` in
 `app/src/web_main.c`) never returns: it sleeps on a shared word until the
-renderer presents a frame, runs as many fixed steps as the elapsed time pays
-for, and sleeps again. A worker that never returns to its event loop cannot
+renderer starts a frame, runs as many fixed steps as the time since the
+previous frame pays for, and sleeps again. A worker that never returns to its event loop cannot
 receive `postMessage`, so everything that goes into the app goes through the
 bridge block.
 
@@ -283,13 +283,15 @@ All C build configuration lives in `app/CMakeLists.txt` and
 four things in order:
 
 1. `read_scene()`: what the renderer says about the loaded scene;
-2. `read_user_input()`: key, pointer and wheel events from the page;
+2. `read_user_input()`: key, pointer and wheel events from the page (in
+   the browser, one page frame's worth, in the first step of each frame's
+   burst; see "Frame pacing" below);
 3. `simulate()`: move the world. This is marked "Your game logic goes here";
 4. `publish_snapshot()`: write the camera and one pose per slot for the
    renderer.
 
 All state lives in `app_state` (`app/src/app.h`). Read held keys with
-`bridge_key_held()`, and handle one-off events in `read_user_input()`. To make
+`app_key_held()`, and handle one-off events in `apply_input()`. To make
 something appear, move or disappear on screen, use `send_command()` with
 `BRIDGE_CMD_BIND`, `BRIDGE_CMD_SPAWN` or `BRIDGE_CMD_DESPAWN`, then publish a
 pose for that slot every step. Set the pose's `BRIDGE_POSE_TELEPORT` flag when
@@ -402,16 +404,17 @@ for it in `audio/src/lib.rs`, followed by `task audio:release`.
 ### Example: use a key
 
 The page reports a fixed set of keys (`BRIDGE_KEY_*` in `app/src/bridge.h`);
-what a key does is decided in the app. Each key arrives two ways: as a held bit
-you can poll every step, and as a `BRIDGE_EV_KEY` event when it goes down or
-up.
+what a key does is decided in the app. Each key arrives as a `BRIDGE_EV_KEY`
+event when it goes down or up, and `app_key_held()` answers whether it is held
+in the current step, worked out from those events in order. A tap shorter than
+a frame still counts as held for one step.
 
 Shift is already reported but unused. To make it a "boost", use the held state
 in `steer_player()`:
 
 ```c
-float accel = bridge_key_held(input, BRIDGE_KEY_SHIFT) ? 2.0f * MOVE_ACCEL : MOVE_ACCEL;
-ball->velocity = vec3_add(ball->velocity, vec3_scale(push, accel * dt));
+float accel = app_key_held(app, BRIDGE_KEY_SHIFT) ? 2.0f * MOVE_ACCEL : MOVE_ACCEL;
+vec3 push = vec3_scale(vec3_normalize(view_to_ground(app, x, z)), accel * dt * app->ball_mass);
 ```
 
 To add a key the page does not report yet, for example F:
@@ -422,9 +425,9 @@ To add a key the page does not report yet, for example F:
 3. `dom/main.js`: add `KeyF: KEY.F,` to `KEY_CODES` (the keys are
    `KeyboardEvent.code` values, so the physical key is the same on every
    layout).
-4. `app/src/app.c`: react to it in `read_user_input()`, next to the
+4. `app/src/app.c`: react to it in `key_event()`, next to the
    `BRIDGE_KEY_SPACE` and `BRIDGE_KEY_R` cases, or poll it with
-   `bridge_key_held()`.
+   `app_key_held()`.
 
 This is an additive change, so `BRIDGE_VERSION` stays the same and the renderer
 is not rebuilt.
@@ -495,21 +498,49 @@ record payload and the rules below; `renderer/src/bridge.rs` and
 `dom/bridge.js` mirror it, and are the only files in their halves of the
 project that know byte offsets. This section is the overview.
 
-**Snapshots and pacing.** Every fixed step, the app writes a snapshot (the
-camera plus one pose per slot) into the next entry of a ring that keeps the
-newest `BRIDGE_SNAPSHOT_COUNT` (32) steps, then stores that step number in
-`latest_step`. Once per presented frame the renderer increments `frame_tick`
-and wakes the app, which has been waiting on that word
-(`bridge_wait_frame()`). The app then runs as many steps as the elapsed time
-pays for (`app/src/fixed_step.c`, which caps a single catch-up at 100 ms).
-Pacing the app from the display keeps the two in phase; a separate timer would
-drift against it.
+**Frame pacing.** This is Glenn Fiedler's
+[Fix Your Timestep](https://gafferongames.com/post/fix_your_timestep/) (fixed
+steps, rendering interpolated between the last two), split across two threads.
+One clock times everything: the browser's frame timestamp
+(`performance.timeOrigin` plus the `requestAnimationFrame` time, in
+microseconds), which all three threads compute the same way.
 
-The app does not wake at perfectly even intervals, so the renderer does not
-draw the newest step. It keeps its own clock that trails `latest_step` by a
-small lag (at least 2 steps, about 8 ms at 240 Hz, and more if wake-ups get
-uneven; see `renderer/src/cursor.rs`), and interpolates between the two
-snapshots either side of it. The snapshot ring is the jitter buffer in between.
+1. At the start of every frame the renderer stores that frame's time in the
+   header (`frame_time_us`), increments `frame_tick` and wakes the app, which
+   has been waiting on that word (`bridge_wait_frame()`).
+2. The app runs as many fixed steps as the time since the previous frame time
+   pays for (`app/src/fixed_step.c`, which caps a single catch-up at 100 ms),
+   writing a snapshot per step (the camera plus one pose per slot) into a ring
+   that keeps the newest `BRIDGE_SNAPSHOT_COUNT` (32) steps. Each snapshot
+   carries the moment its step stands for: the newest one of a burst stands
+   for `frame time - leftover`, where the leftover is the part of a step the
+   time did not pay for yet.
+3. The renderer's NEXT frame draws the moment one step before that frame
+   time, interpolating between the two snapshots around it. That moment
+   advances by exactly the time between frames, so motion is even however the
+   steps fell into bursts (4, 4, 4 at 60 Hz; 1 or 2 at 144 Hz). If the app has
+   not published that far yet, the renderer holds the newest step for a frame
+   and counts it as "app late" in the stats panel.
+
+Because the step count comes from the frame times, not from when the app's
+thread happens to wake, it does not wobble. Pacing the app from the display
+keeps the two in phase; a separate timer would drift against it.
+
+Input goes the same way, one page frame at a time. The page sends its input
+records as they happen and, in its own animation frame (if that frame had
+any input), a `BRIDGE_EV_FRAME_MARK` with its frame time. The app applies, in the first
+step of a burst, the records up to the newest mark that is at least half a
+frame older than the burst's frame time, and keeps the rest for the next
+burst. So every frame drawn carries exactly one page frame of input, and the
+camera, which the app turns from those records, moves evenly.
+
+Latency, from input to the picture: the input waits for the next burst (up to
+one frame), which is drawn in the frame after (one more), plus up to a step of
+interpolation. About two frames: 33 ms at 60 Hz, 17 ms at 120 Hz. The
+pipelining is what lets the app and the renderer run at the same time instead
+of taking turns. A dropped frame shows as a pause and then a double step,
+rather than a single gap.
+
 Commands are stamped with the step they were sent at and take effect when the
 display reaches that step, so a spawn never shows up before the frame it
 belongs to.

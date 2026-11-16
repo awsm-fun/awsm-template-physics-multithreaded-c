@@ -3,6 +3,7 @@
 
 #include "app.h"
 #include "check.h"
+#include "fixed_step.h"
 #include "headless.h"
 
 constexpr float DT = 1.0f / (float)APP_STEP_HZ;
@@ -300,40 +301,131 @@ static void test_click_on_sky_does_nothing(void) {
     fixture_free(f);
 }
 
-static void test_orbit_is_spread_evenly_over_steps(void) {
-    // One movement turns the camera by equal shares over the spread, the
-    // first in the step that reads it, and by the full amount in the end.
-    orbit_camera camera = camera_default(vec3_make(0.0f, 0.4f, 0.0f));
-    float start = camera.yaw;
-    camera_orbit(&camera, 60.0f, 0.0f);
-    camera_step(&camera);
-    float share = camera.yaw - start;
-    CHECK(share < 0.0f); // dragging right turns the yaw down
-    for (int i = 1; i < CAMERA_ORBIT_SPREAD_STEPS; ++i) {
-        float before = camera.yaw;
-        camera_step(&camera);
-        CHECK_NEAR(camera.yaw - before, share, 1e-6);
-    }
-    float total = camera.yaw - start;
-    CHECK_NEAR(total, share * (float)CAMERA_ORBIT_SPREAD_STEPS, 1e-5);
-    // Then it stops.
-    camera_step(&camera);
-    CHECK_NEAR(camera.yaw - start, total, 1e-6);
+// ── Frame pacing and input batching ──────────────────────────────────────
 
-    // Movements that overlap add up: two in a row turn as far in the end as
-    // one twice the size.
-    orbit_camera a = camera_default(vec3_make(0.0f, 0.4f, 0.0f));
-    orbit_camera b = a;
-    camera_orbit(&a, 40.0f, 0.0f);
-    camera_step(&a);
-    camera_orbit(&a, 40.0f, 0.0f);
-    camera_orbit(&b, 80.0f, 0.0f);
-    camera_step(&b);
-    for (int i = 0; i < 2 * CAMERA_ORBIT_SPREAD_STEPS; ++i) {
-        camera_step(&a);
-        camera_step(&b);
+static bridge_snapshot_header *snapshot_of(fixture *f, uint32_t step) {
+    unsigned char *base = (unsigned char *)f->bridge + f->bridge->snapshot_offset;
+    return (bridge_snapshot_header *)(void *)(base + (step & (f->bridge->snapshot_count - 1u)) *
+                                                         f->bridge->snapshot_stride);
+}
+
+static void test_snapshot_times_follow_the_accumulator(void) {
+    // Each snapshot carries the moment its step stands for: the newest one
+    // of a burst `now - leftover`, the ones before it a step apart. Ten
+    // seconds of 60 Hz frames must not let that drift against the frame
+    // times by even one microsecond per frame.
+    fixture *f = fixture_new();
+    fixed_step clock_state = {0};
+    const double start_ms = 4'294'000.0; // the clock wraps (at 2^32 µs) during the run
+    const double frame_ms = 1000.0 / 60.0;
+    const double step_us = 1e6 / (double)APP_STEP_HZ;
+    (void)fixed_step_advance(&clock_state, &f->app, start_ms); // starts the clock
+    for (int frame = 1; frame <= 600; ++frame) {
+        double now_ms = start_ms + frame * frame_ms;
+        uint32_t steps = fixed_step_advance(&clock_state, &f->app, now_ms);
+        CHECK(steps >= 3 && steps <= 5);
+        uint32_t now_us = (uint32_t)llround(now_ms * 1000.0);
+        uint32_t newest = latest(f)->time_us;
+        // `now - leftover`: behind the frame time by less than one step.
+        int32_t behind = (int32_t)(now_us - newest);
+        CHECK(behind >= 0 && behind <= (int32_t)(step_us + 1.0));
+        CHECK_NEAR((double)behind, clock_state.accumulator_ms * 1000.0, 1.0);
+        // The step before it, exactly one step earlier.
+        uint32_t previous = snapshot_of(f, f->app.step - 1u)->time_us;
+        CHECK_NEAR((double)(int32_t)(newest - previous), step_us, 1.0);
+        headless_drain(f->bridge, &f->outbox);
     }
-    CHECK_NEAR(a.yaw, b.yaw, 1e-5);
+    CHECK(f->app.step >= 2399 && f->app.step <= 2400); // 10 s at 240 Hz
+    fixture_free(f);
+}
+
+static void test_input_is_applied_one_page_frame_at_a_time(void) {
+    fixture *f = fixture_new();
+    headless_send_scene(f->bridge);
+    run(f, 3.0f); // the ball comes to rest
+    const double period_ms = 1000.0 / 60.0;
+    const uint32_t frame_us = 16'667;
+    const uint32_t t0 = 0xFFFFFFFFu - 20'000u; // the frame clock wraps between frames
+
+    // Page frame A: W goes down. Page frame B, one frame later: a Space tap.
+    headless_key(f->bridge, BRIDGE_KEY_W, true);
+    headless_frame_mark(f->bridge, t0);
+    headless_key(f->bridge, BRIDGE_KEY_SPACE, true);
+    headless_key(f->bridge, BRIDGE_KEY_SPACE, false);
+    headless_frame_mark(f->bridge, t0 + frame_us);
+
+    // The burst for the frame one after A: A's mark is old enough, B's is not
+    // (it is this frame's own).
+    app_frame_input(&f->app, t0 + frame_us, period_ms);
+    CHECK(f->app.input.count == 5);
+    CHECK(f->app.input.released == 2); // W down, mark A
+    app_step(&f->app, DT);
+    CHECK(app_key_held(&f->app, BRIDGE_KEY_W));
+    CHECK(fabsf(velocity_of(&f->app.balls[APP_PLAYER_SLOT]).y) < 0.5f); // no jump yet
+    // The other steps of the burst apply nothing more.
+    app_step(&f->app, DT);
+    CHECK(f->app.input.count == 3);
+
+    // Two frames with no steps (a display faster than the step rate): B is
+    // released, and waits for the next step that runs.
+    app_frame_input(&f->app, t0 + 2u * frame_us, period_ms);
+    CHECK(f->app.input.released == 3);
+    app_frame_input(&f->app, t0 + 3u * frame_us, period_ms);
+    CHECK(f->app.input.released == 3);
+    app_step(&f->app, DT);
+    CHECK(velocity_of(&f->app.balls[APP_PLAYER_SLOT]).y > 1.0f); // jumped
+    CHECK(f->app.input.count == 0);
+    CHECK(app_key_held(&f->app, BRIDGE_KEY_W)); // still held: no W-up was sent
+    fixture_free(f);
+}
+
+static void test_input_without_marks_is_applied_at_once(void) {
+    fixture *f = fixture_new();
+    headless_send_scene(f->bridge);
+    run(f, 3.0f);
+    const double period_ms = 1000.0 / 60.0;
+
+    // A page that sends no marks (an older one): everything goes at once.
+    headless_key(f->bridge, BRIDGE_KEY_SPACE, true);
+    app_frame_input(&f->app, 1'000'000u, period_ms);
+    CHECK(f->app.input.released == 1);
+    app_step(&f->app, DT);
+    CHECK(velocity_of(&f->app.balls[APP_PLAYER_SLOT]).y > 1.0f);
+
+    // A mark that never comes (lost, or a page stalled half way through a
+    // frame): what did arrive waits for it, but not longer than
+    // APP_MARK_TIMEOUT_US.
+    headless_frame_mark(f->bridge, 1'000'000u);
+    app_frame_input(&f->app, 1'016'667u, period_ms);
+    CHECK(f->app.input.released == 1); // the mark itself
+    headless_key(f->bridge, BRIDGE_KEY_SPACE, false);
+    app_frame_input(&f->app, 1'033'334u, period_ms);
+    CHECK(f->app.input.count == 2);
+    CHECK(f->app.input.released == 1); // the key-up waits for its frame's mark
+    app_frame_input(&f->app, 1'033'334u + APP_MARK_TIMEOUT_US, period_ms);
+    CHECK(f->app.input.released == 1); // not yet
+    app_frame_input(&f->app, 1'033'334u + APP_MARK_TIMEOUT_US + 1u, period_ms);
+    CHECK(f->app.input.released == 2);
+    app_step(&f->app, DT);
+    CHECK(f->app.input.count == 0);
+    fixture_free(f);
+}
+
+static void test_a_tap_shorter_than_a_frame_still_counts(void) {
+    // Down and up in the same frame's input: held for that one step, then not.
+    fixture *f = fixture_new();
+    headless_send_scene(f->bridge);
+    run(f, 3.0f);
+    CHECK_NEAR(velocity_of(&f->app.balls[APP_PLAYER_SLOT]).x, 0.0f, 0.01);
+    headless_key(f->bridge, BRIDGE_KEY_D, true);
+    headless_key(f->bridge, BRIDGE_KEY_D, false);
+    app_step(&f->app, DT);
+    float pushed = velocity_of(&f->app.balls[APP_PLAYER_SLOT]).x;
+    CHECK(pushed > 0.03f); // D pushes to the right with the camera at yaw 0
+    CHECK(!app_key_held(&f->app, BRIDGE_KEY_D));
+    app_step(&f->app, DT);
+    CHECK(velocity_of(&f->app.balls[APP_PLAYER_SLOT]).x <= pushed + 1e-4f); // one push only
+    fixture_free(f);
 }
 
 static void test_camera_ray_matches_projection(void) {
@@ -341,9 +433,6 @@ static void test_camera_ray_matches_projection(void) {
     // come back from camera_ray() at the same place.
     orbit_camera camera = camera_default(vec3_make(0.0f, 0.4f, 0.0f));
     camera_orbit(&camera, 37.0f, 12.0f);
-    for (int i = 0; i < CAMERA_ORBIT_SPREAD_STEPS; ++i) {
-        camera_step(&camera);
-    }
     float aspect = 16.0f / 9.0f;
     vec3 point = vec3_make(1.2f, 0.3f, -0.7f);
 
@@ -369,7 +458,10 @@ int main(void) {
     test_space_jumps();
     test_click_drops_a_ball_and_reset_clears();
     test_chorded_buttons_do_not_leave_the_camera_orbiting();
-    test_orbit_is_spread_evenly_over_steps();
+    test_snapshot_times_follow_the_accumulator();
+    test_input_is_applied_one_page_frame_at_a_time();
+    test_input_without_marks_is_applied_at_once();
+    test_a_tap_shorter_than_a_frame_still_counts();
     test_a_pile_on_several_threads();
     test_two_balls_clack();
     test_touch_swipe_flings_and_tap_drops();
