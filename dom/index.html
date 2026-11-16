@@ -10,7 +10,8 @@
     <script type="module" src="main.js"></script>
   </head>
   <body>
-    <canvas id="view"></canvas>
+    <!-- tabindex: focusable, so pressing it takes the keyboard (see main.js). -->
+    <canvas id="view" tabindex="-1"></canvas>
 
     <!-- Everything drawn over the canvas. main.js fills in the text; the
          behaviour lives in stats.js, about.js and settings.js. Hidden as a

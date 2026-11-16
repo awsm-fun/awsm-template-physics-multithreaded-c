@@ -430,6 +430,12 @@ function main() {
   // The keys the current app has been told are down.
   const heldKeys = new Set();
 
+  // Take the keyboard from the start, so W/A/S/D work without a click first.
+  // In an iframe the browser ignores this without a user gesture: then the
+  // page around it has to focus the frame (awsm.fun does, once it loads), or
+  // the first press on the canvas takes the keyboard (see pointerdown).
+  window.focus();
+
   window.addEventListener('keydown', (event) => {
     startAudio(); // any key press is a user gesture
     if (event.ctrlKey || event.metaKey || event.altKey) return; // leave shortcuts alone
@@ -494,6 +500,11 @@ function main() {
   canvas.addEventListener('pointerdown', (event) => {
     if (!event.isPrimary || drag) return; // one pointer at a time
     event.preventDefault();
+    // Cancelling the press also cancels the focus change it would bring, so
+    // focus is taken by hand. That matters inside an iframe (the awsm.fun
+    // gallery shows the page in one): until the frame has focus, the
+    // keyboard goes to the page around it.
+    canvas.focus({ preventScroll: true });
     startAudio();
     // Capture can only fail for a pointer the browser does not know (events
     // made by a test script); the press itself still counts.

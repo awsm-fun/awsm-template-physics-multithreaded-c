@@ -107,10 +107,11 @@ mod stats {
     pub const GPU_FRAME_COUNT: u32 = 20;
     pub const SYNC_ERROR_MAX: u32 = 24;
     pub const DISPLAY_LAG: u32 = 28;
+    pub const FRAME_SPAN_US: u32 = 36;
     /// End of the last field above. (The section has been 64 bytes from the
     /// start, so even an app built before the later fields existed has room
     /// for them: they were `reserved` words it never touches.)
-    pub const READ_SIZE: u32 = 32;
+    pub const READ_SIZE: u32 = 40;
 }
 
 /// Byte offsets inside `bridge_ring` (the header in front of a ring's records).
@@ -327,6 +328,7 @@ pub struct Bridge {
     gpu_frame_count: u32,
     sync_error_max: u32,
     display_lag: u32,
+    frame_span_us: u32,
 
     snapshots: SnapshotRing,
     to_app: Ring,
@@ -588,6 +590,7 @@ impl Bridge {
             gpu_frame_count: (stats_offset + stats::GPU_FRAME_COUNT) / 4,
             sync_error_max: (stats_offset + stats::SYNC_ERROR_MAX) / 4,
             display_lag: (stats_offset + stats::DISPLAY_LAG) / 4,
+            frame_span_us: (stats_offset + stats::FRAME_SPAN_US) / 4,
             snapshots,
             to_app,
             from_app,
@@ -741,8 +744,11 @@ impl Bridge {
 
     /// Tells the app a frame was presented: updates the renderer's stats, then
     /// bumps the frame tick and wakes the app, which sleeps on that word
-    /// between frames.
-    pub fn frame_presented(&self, work_us: u32) {
+    /// between frames. `span_us` is the time since the previous frame by the
+    /// browser's frame timestamps (0 for the first); it is added before the
+    /// frame is counted, so a page that sees the new count also sees it.
+    pub fn frame_presented(&self, work_us: u32, span_us: u32) {
+        let _ = Atomics::add(&self.words, self.frame_span_us, span_us as i32);
         let _ = Atomics::add(&self.words, self.frame_count, 1);
         let _ = Atomics::add(&self.words, self.frame_work_us, work_us as i32);
         let _ = Atomics::add(&self.words, self.frame_tick, 1);

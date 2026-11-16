@@ -825,6 +825,7 @@ void app_step(app_state *app, float dt) {
 
     read_scene(app);
     read_user_input(app);
+    camera_step(&app->camera);
     // Before the scene is known there is nothing to simulate, but the
     // snapshot still goes out: it carries the camera the renderer draws with.
     if (app->scene.ready) {

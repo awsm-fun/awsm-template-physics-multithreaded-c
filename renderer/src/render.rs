@@ -345,6 +345,9 @@ struct App {
     /// bridge. Timestamp readbacks arrive a few frames late, so the totals are
     /// only written when a new sample has come in.
     gpu_samples_published: Option<u64>,
+    /// The previous frame's `requestAnimationFrame` timestamp, for the frame
+    /// span the page's stats panel turns into missed frames.
+    last_frame_ms: Option<f64>,
     /// Set while frames are failing, so a persistent failure is reported once
     /// rather than sixty times a second.
     render_failing: bool,
@@ -415,6 +418,7 @@ impl App {
             camera: camera::STARTUP,
             frames_drawn: 0,
             gpu_samples_published: None,
+            last_frame_ms: None,
             render_failing: false,
             warned_unknown_record: false,
         })
@@ -555,8 +559,17 @@ impl App {
                 }
             }
             let work_us = (self.performance.now() - work_start) * 1000.0;
-            bridge.frame_presented(work_us.max(0.0) as u32);
+            // Rounded per frame; the page divides whole seconds of these by a
+            // refresh period, so sub-microsecond loss does not matter.
+            let span_us = self
+                .last_frame_ms
+                .map_or(0.0, |last| ((frame_ms - last) * 1000.0).round());
+            bridge.frame_presented(
+                work_us.max(0.0) as u32,
+                span_us.clamp(0.0, u32::MAX as f64) as u32,
+            );
         }
+        self.last_frame_ms = Some(frame_ms);
     }
 
     /// Connects to an app instance's bridge block, replacing any previous one.

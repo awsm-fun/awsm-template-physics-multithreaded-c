@@ -25,8 +25,21 @@ orbit_camera camera_default(vec3 target) {
 }
 
 void camera_orbit(orbit_camera *camera, float dx_px, float dy_px) {
-    camera->yaw -= dx_px * ORBIT_RADIANS_PER_PX;
-    camera->pitch = clampf(camera->pitch - dy_px * ORBIT_RADIANS_PER_PX, PITCH_MIN, PITCH_MAX);
+    float yaw = -dx_px * ORBIT_RADIANS_PER_PX / (float)CAMERA_ORBIT_SPREAD_STEPS;
+    float pitch = -dy_px * ORBIT_RADIANS_PER_PX / (float)CAMERA_ORBIT_SPREAD_STEPS;
+    for (int i = 0; i < CAMERA_ORBIT_SPREAD_STEPS; ++i) {
+        camera->orbit_yaw[i] += yaw;
+        camera->orbit_pitch[i] += pitch;
+    }
+}
+
+void camera_step(orbit_camera *camera) {
+    int slot = camera->orbit_next;
+    camera->yaw += camera->orbit_yaw[slot];
+    camera->pitch = clampf(camera->pitch + camera->orbit_pitch[slot], PITCH_MIN, PITCH_MAX);
+    camera->orbit_yaw[slot] = 0.0f;
+    camera->orbit_pitch[slot] = 0.0f;
+    camera->orbit_next = (slot + 1) % CAMERA_ORBIT_SPREAD_STEPS;
 }
 
 void camera_zoom(orbit_camera *camera, float dy_px) {

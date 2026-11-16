@@ -48,8 +48,9 @@ each as loud as the impact was hard and placed in stereo where it happened. It
 starts on the first key or pointer press, as browsers require.
 
 Over the canvas: the controls, whether sound is on and a status line (top
-left); a **Stats** panel (bottom-left button) with frames per second, the GPU
-and CPU time per frame, the app's CPU time per simulation step, steps per
+left); a **Stats** panel (bottom-left button) with the display's refresh rate,
+frames per second, missed frames (refreshes that went by with no new frame:
+any steady count is visible stutter), the GPU and CPU time per frame, the app's CPU time per simulation step, steps per
 second, whether the picture keeps in step with the simulation, Box3D's thread
 count, the number of dropped balls and the last impact cue; **About** (bottom
 centre); and **Settings** (bottom right): the render resolution and the

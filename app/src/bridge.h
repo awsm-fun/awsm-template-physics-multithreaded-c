@@ -218,7 +218,14 @@ typedef struct bridge_stats {
     // Written by the app, once, at start-up.
     _Atomic uint32_t solver_threads; // 32  threads Box3D steps the world on, counting the app's
 
-    uint32_t reserved[7]; // 36
+    // Written by the renderer: the time from each presented frame to the next,
+    // summed, by the browser's frame timestamps. Over a window, this divided
+    // by the display's refresh period says how many refreshes went by, and
+    // the change in frame_count how many of them got a new frame; the page
+    // shows the difference as missed frames.
+    _Atomic uint32_t frame_span_us; // 36  total microseconds between frames (wraps)
+
+    uint32_t reserved[6]; // 40
 } bridge_stats;           // 64
 
 // ── Snapshot ring (app → renderer) ─────────────────────────────────────────
@@ -417,6 +424,7 @@ static_assert(offsetof(bridge_stats, gpu_frame_us) == 16, "bridge_stats.gpu_fram
 static_assert(offsetof(bridge_stats, sync_error_max) == 24, "bridge_stats.sync_error_max");
 static_assert(offsetof(bridge_stats, display_lag) == 28, "bridge_stats.display_lag");
 static_assert(offsetof(bridge_stats, solver_threads) == 32, "bridge_stats.solver_threads");
+static_assert(offsetof(bridge_stats, frame_span_us) == 36, "bridge_stats.frame_span_us");
 
 static_assert(sizeof(bridge_camera) == 48, "bridge_camera size");
 static_assert(sizeof(bridge_pose) == 32, "bridge_pose size");

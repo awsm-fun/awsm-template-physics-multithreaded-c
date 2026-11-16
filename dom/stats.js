@@ -5,8 +5,21 @@
 // bridge block's stats section (see bridge_stats in app/src/bridge.h): no
 // messages, nothing measured here. What it shows:
 //
+//   display       the display's refresh rate, as the browser's frame clock
+//                 runs it: measured here, from this thread's own
+//                 requestAnimationFrame timestamps (see measureRefresh). On
+//                 a Mac with screens of different rates, this is the rate
+//                 Chrome paces the window at, which is what matters here.
 //   render        frames presented per second. This is capped by the
 //                 display (60 on a 60 Hz screen, 120 on a 120 Hz one).
+//   missed        display refreshes that went by without a new frame, in
+//                 the last sample and in total since the app started: the
+//                 renderer's frames were too slow (or arrived unevenly) for
+//                 the display. Any steady count here is visible stutter;
+//                 lower the resolution or the anti-aliasing in Settings.
+//                 Counted exactly: the renderer sums the time between its
+//                 frames' timestamps (frame_span_us), and that time divided
+//                 by the refresh period is how many refreshes went by.
 //   gpu time      the GPU's time per frame, from the renderer's timestamp
 //                 queries: the number that says whether a frame can make the
 //                 display's refresh (8.3 ms at 120 Hz). `n/a` on a GPU
@@ -63,6 +76,56 @@ const SYNC_ROUGH_WINDOWS = 3;
 // so a stalled renderer keeps waiting instead of "warming up" through the
 // stall.
 const WARMUP_FRAMES = 60;
+// The refresh period is the typical gap between this thread's animation
+// frames: of the last REFRESH_SAMPLES gaps, the mean of those within
+// REFRESH_INLIER of the median (a frame this thread itself missed, or a gap
+// around a tab switch, is not a refresh). Two seconds of history at 60 Hz, so
+// moving the window to a screen with another rate shows within a moment.
+const REFRESH_SAMPLES = 120;
+const REFRESH_MIN_SAMPLES = 30;
+const REFRESH_INLIER = 0.15;
+// A window whose frame span is longer than the window itself by more than
+// this (ms) contains a pause from before it (a hidden tab, a debugger stop):
+// a pause is not missed frames, so the window is not counted.
+const PAUSE_SLACK_MS = 250;
+
+// Measures the display's refresh period from this thread's own animation
+// frames. This thread does little per frame, so it keeps up with the display
+// even when the renderer does not. Returns { periodMs() }: the period in
+// milliseconds, or null until enough frames have been seen.
+function measureRefresh() {
+  const gaps = [];
+  let last = null;
+  const tick = (t) => {
+    if (last !== null) {
+      gaps.push(t - last);
+      if (gaps.length > REFRESH_SAMPLES) gaps.shift();
+    }
+    last = t;
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  // A hidden tab runs no frames: the gap across it is not a refresh.
+  document.addEventListener('visibilitychange', () => {
+    last = null;
+  });
+  return {
+    periodMs() {
+      if (gaps.length < REFRESH_MIN_SAMPLES) return null;
+      const sorted = [...gaps].sort((a, b) => a - b);
+      const median = sorted[sorted.length >> 1];
+      let sum = 0;
+      let count = 0;
+      for (const gap of gaps) {
+        if (Math.abs(gap - median) <= median * REFRESH_INLIER) {
+          sum += gap;
+          count += 1;
+        }
+      }
+      return count > 0 && sum > 0 ? sum / count : null;
+    },
+  };
+}
 
 // The panel's first lines, which never change, and what follows them until
 // there are numbers to show.
@@ -102,6 +165,7 @@ export function installStats({ getBridge, getLastCue }) {
   };
   show(HEAD_STARTING);
 
+  const refresh = measureRefresh();
   let renderReady = false;
   let bridge = null; // the Bridge the state below belongs to
   let baseline = null; // the previous sample
@@ -114,6 +178,12 @@ export function installStats({ getBridge, getLastCue }) {
   // device evidently has no timestamp queries, and the line says so.
   let gpuEmptyWindows = 0;
   let roughWindows = 0;
+  // Missed refreshes: in the latest window (per second), and the running
+  // total. The total is kept signed: a sample that lands between the
+  // renderer's two counter writes counts one frame early or late, and the
+  // next window evens it out.
+  let missedRate = null;
+  let missedTotal = 0;
   // frameCount when counting could first start (see WARMUP_FRAMES).
   let warmFrame = null;
 
@@ -133,6 +203,8 @@ export function installStats({ getBridge, getLastCue }) {
       fpsEma = stepsEma = frameWorkEma = stepWorkEma = gpuEma = null;
       gpuEmptyWindows = 0;
       roughWindows = 0;
+      missedRate = null;
+      missedTotal = 0;
       warmFrame = null;
     }
     if (!bridge) {
@@ -188,6 +260,21 @@ export function installStats({ getBridge, getLastCue }) {
     } else {
       gpuEmptyWindows += 1;
     }
+    // Refreshes that went by in the window, by the renderer's own frame
+    // timestamps, minus the frames it presented in them.
+    const periodMs = refresh.periodMs();
+    const spanMs = ((stats.frameSpanUs - previous.frameSpanUs) >>> 0) / 1000;
+    if (periodMs !== null && spanMs <= now - previous.at + PAUSE_SLACK_MS) {
+      const missed = Math.round(spanMs / periodMs) - frames;
+      missedTotal += missed;
+      missedRate = Math.max(missed, 0) / seconds;
+    }
+    const displayText = periodMs === null ? 'measuring…' : `${(1000 / periodMs).toFixed(0)} Hz`;
+    const missedText =
+      missedRate === null
+        ? '—'
+        : `${missedRate.toFixed(0)}/s · ${Math.max(missedTotal, 0)} total`;
+
     let gpuText = '—';
     if (gpuEma !== null) gpuText = `${gpuEma.toFixed(1)} ms`;
     else if (gpuEmptyWindows >= 3) gpuText = 'n/a';
@@ -195,7 +282,9 @@ export function installStats({ getBridge, getLastCue }) {
 
     const headText =
       HEAD_MAIN +
+      `  display       ${displayText}\n` +
       `  render        ${fpsEma.toFixed(0)} fps\n` +
+      `  missed        ${missedText}\n` +
       `  gpu time      ${gpuText}\n` +
       `  cpu time      ${cpuText(frameWorkEma, 1)}\n` +
       `  physics time  ${cpuText(stepWorkEma, 2)}\n` +

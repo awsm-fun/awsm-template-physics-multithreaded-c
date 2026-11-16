@@ -105,6 +105,7 @@ const STATS = {
   syncErrorMax: 24, // f32 bits
   displayLag: 28, // f32 bits
   solverThreads: 32,
+  frameSpanUs: 36,
 };
 const RING_FIELDS = {
   head: 0,
@@ -372,6 +373,7 @@ export class Bridge {
       gpuFrameCount: load(STATS.gpuFrameCount),
       displayLag: this.#bitsFloat(load(STATS.displayLag)),
       solverThreads: load(STATS.solverThreads),
+      frameSpanUs: load(STATS.frameSpanUs),
       latestStep: Atomics.load(this.#u32, Bridge.#word(this.#base + HEADER.latestStep)),
     };
   }

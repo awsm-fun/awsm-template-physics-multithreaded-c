@@ -300,11 +300,50 @@ static void test_click_on_sky_does_nothing(void) {
     fixture_free(f);
 }
 
+static void test_orbit_is_spread_evenly_over_steps(void) {
+    // One movement turns the camera by equal shares over the spread, the
+    // first in the step that reads it, and by the full amount in the end.
+    orbit_camera camera = camera_default(vec3_make(0.0f, 0.4f, 0.0f));
+    float start = camera.yaw;
+    camera_orbit(&camera, 60.0f, 0.0f);
+    camera_step(&camera);
+    float share = camera.yaw - start;
+    CHECK(share < 0.0f); // dragging right turns the yaw down
+    for (int i = 1; i < CAMERA_ORBIT_SPREAD_STEPS; ++i) {
+        float before = camera.yaw;
+        camera_step(&camera);
+        CHECK_NEAR(camera.yaw - before, share, 1e-6);
+    }
+    float total = camera.yaw - start;
+    CHECK_NEAR(total, share * (float)CAMERA_ORBIT_SPREAD_STEPS, 1e-5);
+    // Then it stops.
+    camera_step(&camera);
+    CHECK_NEAR(camera.yaw - start, total, 1e-6);
+
+    // Movements that overlap add up: two in a row turn as far in the end as
+    // one twice the size.
+    orbit_camera a = camera_default(vec3_make(0.0f, 0.4f, 0.0f));
+    orbit_camera b = a;
+    camera_orbit(&a, 40.0f, 0.0f);
+    camera_step(&a);
+    camera_orbit(&a, 40.0f, 0.0f);
+    camera_orbit(&b, 80.0f, 0.0f);
+    camera_step(&b);
+    for (int i = 0; i < 2 * CAMERA_ORBIT_SPREAD_STEPS; ++i) {
+        camera_step(&a);
+        camera_step(&b);
+    }
+    CHECK_NEAR(a.yaw, b.yaw, 1e-5);
+}
+
 static void test_camera_ray_matches_projection(void) {
     // A point projected to the screen with the view-projection matrix must
     // come back from camera_ray() at the same place.
     orbit_camera camera = camera_default(vec3_make(0.0f, 0.4f, 0.0f));
     camera_orbit(&camera, 37.0f, 12.0f);
+    for (int i = 0; i < CAMERA_ORBIT_SPREAD_STEPS; ++i) {
+        camera_step(&camera);
+    }
     float aspect = 16.0f / 9.0f;
     vec3 point = vec3_make(1.2f, 0.3f, -0.7f);
 
@@ -330,6 +369,7 @@ int main(void) {
     test_space_jumps();
     test_click_drops_a_ball_and_reset_clears();
     test_chorded_buttons_do_not_leave_the_camera_orbiting();
+    test_orbit_is_spread_evenly_over_steps();
     test_a_pile_on_several_threads();
     test_two_balls_clack();
     test_touch_swipe_flings_and_tap_drops();
