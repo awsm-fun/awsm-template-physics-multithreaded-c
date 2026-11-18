@@ -88,8 +88,9 @@ each as loud as the impact was hard and placed in stereo where it happened. It
 starts on the first key or pointer press, as browsers require.
 
 Over the canvas: the controls, whether sound is on and a status line (top
-left); a **Stats** panel (bottom-left button, described below); **About**
-(bottom centre); and **Settings** (bottom right): the render resolution and the
+left); a **Stats** panel (bottom-left button, described below); **About** (bottom
+centre), which says what the demo is and, on a second tab, explains every
+number in the Stats panel; and **Settings** (bottom right): the render resolution and the
 anti-aliasing (Off, SMAA, 4× MSAA). The resolution starts at native, held to
 a budget of 2.8 million pixels (so a big high-DPI window starts below 100%);
 touch devices and software GPUs start lower. Choices are remembered in

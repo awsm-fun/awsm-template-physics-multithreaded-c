@@ -354,12 +354,13 @@ function main() {
 
   // ── Panels ──
 
+  const about = installAbout();
   const stats = installStats({
     getBridge: () => app?.bridge ?? null,
     getLastCue: () => lastCue,
     gameRows: gameStatsRows,
+    onHelp: () => about.open('stats'),
   });
-  installAbout();
 
   // ── Settings: canvas size and anti-aliasing ──
 

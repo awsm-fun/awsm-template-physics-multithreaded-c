@@ -31,55 +31,260 @@
       <button class="about-btn" id="about-btn" type="button">About</button>
       <button class="settings-btn" id="settings-btn" type="button">Settings</button>
 
+      <!-- The About modal: what the demo is (About) and what the Stats panel's
+           numbers mean (Stats). The tabs are wired up in runtime/about.js. -->
       <div class="about-overlay" id="about" hidden>
-        <div class="about-modal">
+        <div class="about-modal" role="dialog" aria-modal="true" aria-labelledby="about-title">
           <button class="about-close" type="button" aria-label="Close" data-close>×</button>
-          <h2>Multithreaded Physics Demo</h2>
-          <p>
-            A copyable template from the
-            <a href="https://awsm.fun" target="_blank" rel="noopener">Awsm</a> project — a WebGPU
-            game skeleton running across three threads, all over one shared WebAssembly.Memory: a
-            C app that owns the whole game and steps Box3D on its own worker threads, a Rust
-            renderer, and a plain JavaScript page that takes the input and plays the sound. No
-            postMessage on any hot path, real atomics, wasm SIMD in the solver.
-          </p>
-          <ul>
-            <li>
-              Rendering:
-              <a href="https://scene.awsm.fun" target="_blank" rel="noopener">AwsmRenderer</a>
-            </li>
-            <li>
-              Audio: <a href="https://audio.awsm.fun" target="_blank" rel="noopener">AwsmAudio</a>
-            </li>
-            <li>
-              Physics:
-              <a href="https://github.com/erincatto/box3d" target="_blank" rel="noopener">Box3D</a>
-            </li>
-          </ul>
-          <p>
-            Roll the red ball with WASD, jump with Space, click the table to drop more balls (Enter
-            clears them; R reloads the whole scene) — every impact is synthesized and
-            spatialized in real time from the physics contacts. Drag with the right mouse button
-            to orbit the camera and scroll to zoom; the controls and the stereo image stay relative
-            to your view from any angle.
-          </p>
-          <p>
-            The stats panel (the Stats button, bottom left) shows each thread live, one group
-            per thread: the renderer's frame rate and its GPU and CPU time per frame, the app's
-            and Box3D's time per physics step, and whether the picture keeps in step with the
-            simulation; click a group for its breakdown. Box3D runs
-            its solver on the app's thread plus up to four more (Emscripten pthreads sharing the
-            app's memory, scheduled by Box3D itself). Drop more balls and watch the physics time
-            grow.
-          </p>
-          <p class="about-repo">
+          <header class="about-header">
+            <h2 id="about-title">Multithreaded Physics Demo</h2>
             <a
+              class="about-github"
               href="https://github.com/awsm-fun/awsm-template-physics-multithreaded-c"
               target="_blank"
               rel="noopener"
-              >Source on GitHub</a
+              >View the template on GitHub ↗</a
             >
-          </p>
+          </header>
+          <div class="about-tabs" role="tablist" aria-label="About this demo">
+            <button
+              class="about-tab"
+              type="button"
+              role="tab"
+              id="about-tab-about"
+              aria-controls="about-panel-about"
+              aria-selected="true"
+            >
+              About
+            </button>
+            <button
+              class="about-tab"
+              type="button"
+              role="tab"
+              id="about-tab-stats"
+              aria-controls="about-panel-stats"
+              aria-selected="false"
+              tabindex="-1"
+            >
+              Stats
+            </button>
+          </div>
+
+          <div
+            class="about-panel"
+            role="tabpanel"
+            id="about-panel-about"
+            aria-labelledby="about-tab-about"
+            tabindex="0"
+          >
+            <p>
+              Balls on a table, simulated by Box3D, with every impact turned into sound: a small
+              physics game spread over several threads, and a template to start your own from.
+            </p>
+            <h3>Controls</h3>
+            <table class="about-keys">
+              <tr>
+                <th>W A S D or arrows</th>
+                <td>roll the red ball</td>
+              </tr>
+              <tr>
+                <th>Space</th>
+                <td>jump</td>
+              </tr>
+              <tr>
+                <th>Click or tap the table</th>
+                <td>drop a ball there</td>
+              </tr>
+              <tr>
+                <th>Swipe</th>
+                <td>fling the red ball</td>
+              </tr>
+              <tr>
+                <th>Enter</th>
+                <td>clear the dropped balls</td>
+              </tr>
+              <tr>
+                <th>R</th>
+                <td>load the scene again</td>
+              </tr>
+              <tr>
+                <th>Right-drag, wheel</th>
+                <td>orbit and zoom the camera</td>
+              </tr>
+            </table>
+            <p>Sound starts on your first key or click.</p>
+            <h3>How it works</h3>
+            <p>
+              Every thread shares one block of memory. This page takes the input and plays the
+              sound. A C app in a worker runs the game at a fixed 240 steps a second and steps
+              <a href="https://github.com/erincatto/box3d" target="_blank" rel="noopener">Box3D</a>
+              across up to five threads. A Rust WebGPU renderer (<a
+                href="https://scene.awsm.fun"
+                target="_blank"
+                rel="noopener"
+                >AwsmRenderer</a
+              >) in another worker draws it, blending between steps so motion stays smooth at any
+              refresh rate. Impacts become sound cues, synthesized by
+              <a href="https://audio.awsm.fun" target="_blank" rel="noopener">AwsmAudio</a> and
+              placed in stereo where they happened. Nothing that happens every frame goes through
+              postMessage.
+            </p>
+            <h3>Make it yours</h3>
+            <p>
+              Your game lives in three places: <code>app/src/game/</code> (the logic, in C),
+              <code>dom/game.js</code> (keys, HUD text, which cue makes which sound) and
+              <code>media/</code> (the scene and the sounds). Save a C file and the running page
+              swaps the new build in, without a reload.
+            </p>
+            <p class="about-more">
+              The README has the rest. Part of the
+              <a href="https://awsm.fun" target="_blank" rel="noopener">Awsm</a> project.
+            </p>
+          </div>
+
+          <div
+            class="about-panel"
+            role="tabpanel"
+            id="about-panel-stats"
+            aria-labelledby="about-tab-stats"
+            tabindex="0"
+            hidden
+          >
+            <p>
+              The Stats button (bottom left) opens a panel: a frame budget first, then one group
+              per thread. Each group's header shows its main number; click a group to open its
+              breakdown. A breakdown is only measured while its group is open, so the panel costs
+              nothing when it is closed.
+            </p>
+            <p>
+              <code>ms / frame</code> is time per rendered frame. <code>µs / step</code> is time
+              per simulation step (1000 µs = 1 ms). <code>/ s</code> is per second.
+            </p>
+
+            <h3>frame budget</h3>
+            <dl>
+              <dt>budget</dt>
+              <dd>
+                The time one display refresh allows: 16.7 ms at 60 Hz, 8.3 ms at 120 Hz. It comes
+                from your display's measured refresh rate.
+              </dd>
+              <dt>headroom</dt>
+              <dd>
+                The budget minus the largest lane below. The GPU and the threads work in parallel,
+                so their times do not add up: each one has to fit the budget on its own. If it
+                reads <code>over by …</code>, that lane cannot keep up with the display.
+              </dd>
+              <dt>the lanes</dt>
+              <dd>
+                One row for the GPU and one per thread: the time it uses per frame, out of the
+                budget. Here: the GPU, the renderer, the app worker and the page. The app worker's
+                lane is its whole step, Box3D's included, times the steps in a frame.
+              </dd>
+              <dt>latency (renderer + GPU), reference only</dt>
+              <dd>
+                Roughly how long one frame takes from the renderer starting it to the GPU
+                finishing it. Not what the budget is checked against.
+              </dd>
+            </dl>
+            <p>
+              Missed frames while there is headroom mean something is waiting rather than working,
+              for example the CPU waiting on the GPU.
+            </p>
+
+            <h3>display</h3>
+            <dl>
+              <dt>refresh rate</dt>
+              <dd>How often your display refreshes, as the browser paces this page.</dd>
+              <dt>frames presented</dt>
+              <dd>New frames shown per second (fps). Never more than the refresh rate.</dd>
+              <dt>missed frames</dt>
+              <dd>
+                Refreshes that went by without a new frame. A steady count is visible stutter:
+                lower the resolution or the anti-aliasing in Settings.
+              </dd>
+            </dl>
+
+            <h3>GPU</h3>
+            <dl>
+              <dt>GPU time per frame</dt>
+              <dd>
+                How long the GPU works on a frame, from timestamp queries. Reads
+                <code>n/a</code> where the browser or the GPU does not offer them.
+              </dd>
+              <dt>the rows</dt>
+              <dd>
+                One per render pass. Some GPUs (Apple's) run passes overlapped, so the rows can
+                add up to more than the frame.
+              </dd>
+            </dl>
+
+            <h3>renderer (render worker)</h3>
+            <dl>
+              <dt>the header</dt>
+              <dd>The render thread's CPU time per frame.</dd>
+              <dt>read app state + interpolate</dt>
+              <dd>
+                Reads the two latest simulation steps and blends between them for this frame's
+                exact moment.
+              </dd>
+              <dt>set camera, update transforms</dt>
+              <dd>Sets the view, and turns the new poses into world matrices.</dd>
+              <dt>render (encode + submit)</dt>
+              <dd>
+                The renderer's own work, split into <code>prepare</code> (uploading this frame's
+                data to the GPU), <code>passes</code> (encoding each render pass),
+                <code>submit</code> (handing the frame to the GPU) and
+                <code>outside the scopes</code> (the little that is left untimed). The smallest
+                rows are folded into "N more under 1 µs".
+              </dd>
+            </dl>
+
+            <h3>app (C, app worker)</h3>
+            <dl>
+              <dt>the header</dt>
+              <dd>
+                CPU time of the app's own code in one fixed simulation step, without Box3D's
+                part.
+              </dd>
+              <dt>steps</dt>
+              <dd>
+                Steps per second. Fixed (240), whatever the display does; the renderer blends
+                between steps.
+              </dd>
+              <dt>late frames</dt>
+              <dd>
+                Frames drawn before the app had finished the moment they show; such a frame holds
+                the previous pose. The row and the header turn red if it keeps happening.
+              </dd>
+              <dt>read scene, read input, game logic, poses + contact events, publish</dt>
+              <dd>The parts of a step, in order (Box3D's step runs after the game logic).</dd>
+              <dt>balls dropped, last cue</dt>
+              <dd>How many balls you have dropped, and the latest impact sound with its strength.</dd>
+            </dl>
+
+            <h3>physics (Box3D, N threads)</h3>
+            <dl>
+              <dt>the header</dt>
+              <dd>
+                The time of Box3D's step, which the app worker runs together with its solver
+                threads. Drop more balls and watch it grow.
+              </dd>
+              <dt>find pairs, collide, solve, sensors</dt>
+              <dd>
+                The stages of the step, as Box3D reports them, with the parts of its solver under
+                <code>solve</code>.
+              </dd>
+            </dl>
+
+            <h3>page (main thread)</h3>
+            <dl>
+              <dt>frame marks + sound cues</dt>
+              <dd>
+                The page's own work per frame: marking the frame's input and playing the sound
+                cues. It should stay tiny; the heavy work is in the workers.
+              </dd>
+            </dl>
+          </div>
         </div>
       </div>
 
