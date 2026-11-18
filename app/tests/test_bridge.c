@@ -53,6 +53,11 @@ static void test_layout(void) {
         CHECK(atomic_load(&ring->head) == 0);
         CHECK(atomic_load(&ring->tail) == 0);
     }
+    CHECK(b->timing_offset % BRIDGE_ALIGN == 0);
+    CHECK(b->timing_offset >= end);
+    CHECK(b->timing_capacity == BRIDGE_TIMING_CAPACITY);
+    CHECK(b->timing_stride == sizeof(bridge_timing));
+    end = b->timing_offset + b->timing_capacity * b->timing_stride;
     CHECK(end <= b->total_size);
 
     // Freshly zeroed.
@@ -60,6 +65,35 @@ static void test_layout(void) {
     CHECK(atomic_load(&b->latest_step) == 0);
     CHECK(atomic_load(&bridge_get_input(b)->keys[0]) == 0);
     CHECK(atomic_load(&bridge_get_stats(b)->frame_count) == 0);
+
+    bridge_destroy(b);
+}
+
+static void test_timing_table(void) {
+    bridge_header *b = bridge_create(60.0f);
+    bridge_timing *table = (bridge_timing *)(void *)((unsigned char *)b + b->timing_offset);
+
+    CHECK(atomic_load(&table[1].kind) == BRIDGE_TIMING_UNUSED);
+    bridge_timing_name(b, 1, BRIDGE_TIMING_PHYSICS_STAGE, "collide");
+    CHECK(atomic_load(&table[1].kind) == BRIDGE_TIMING_PHYSICS_STAGE);
+    CHECK(strcmp(table[1].name, "collide") == 0);
+
+    // Totals are in nanoseconds; the count is how many steps they cover.
+    bridge_timing_add(b, 1, 0.0015); // 1.5 microseconds
+    bridge_timing_add(b, 1, 0.0005);
+    CHECK(atomic_load(&table[1].total_ns) == 2000u);
+    CHECK(atomic_load(&table[1].count) == 2u);
+
+    // The renderer's entries are not the app's to write.
+    bridge_timing_name(b, BRIDGE_TIMING_APP_SLOTS, BRIDGE_TIMING_APP_PHASE, "not mine");
+    bridge_timing_add(b, BRIDGE_TIMING_APP_SLOTS, 1.0);
+    CHECK(atomic_load(&table[BRIDGE_TIMING_APP_SLOTS].kind) == BRIDGE_TIMING_UNUSED);
+    CHECK(atomic_load(&table[BRIDGE_TIMING_APP_SLOTS].count) == 0u);
+
+    // The page turns detail on and off through the stats section.
+    CHECK(bridge_detail(b) == 0);
+    atomic_store(&bridge_get_stats(b)->detail, BRIDGE_DETAIL_APP | BRIDGE_DETAIL_PHYSICS);
+    CHECK(bridge_detail(b) == (BRIDGE_DETAIL_APP | BRIDGE_DETAIL_PHYSICS));
 
     bridge_destroy(b);
 }
@@ -265,6 +299,7 @@ int main(void) {
     test_ring_counter_wrap();
     test_snapshot_seqlock();
     test_input_readers();
+    test_timing_table();
     test_frame_tick();
     test_hash();
     return check_report();

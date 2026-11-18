@@ -28,6 +28,10 @@
 //   bridge_input       continuous input state (held keys, pointer, canvas size)
 //                      dom → app
 //   bridge_stats       counters for the on-page stats panel
+//   timing table       named running totals for that panel's breakdowns (the
+//                      app's step phases, Box3D's stages, the renderer's
+//                      frame phases and passes), filled in only while the
+//                      panel asks for them
 //   snapshot ring      the app's published world state: one snapshot per fixed
 //                      step (camera + a pose per slot, and the time the step
 //                      stands for), newest BRIDGE_SNAPSHOT_COUNT steps kept.
@@ -182,7 +186,13 @@ typedef struct bridge_header {
     // time itself (on the same clock).
     _Atomic uint32_t frame_time_valid; // 100
 
-    uint32_t reserved1[6]; // 104
+    // Section table, continued. All three are 0 from an app built before the
+    // timing table existed: there is no table then.
+    uint32_t timing_offset;   // 104  the first bridge_timing
+    uint32_t timing_capacity; // 108  entries in the table
+    uint32_t timing_stride;   // 112  bytes per entry
+
+    uint32_t reserved1[3]; // 116
 } bridge_header;           // 128
 
 // ── Input state (dom → app) ────────────────────────────────────────────────
@@ -268,8 +278,66 @@ typedef struct bridge_stats {
     // late: its burst did not finish within a frame).
     _Atomic uint32_t app_late; // 40  frames (wraps)
 
-    uint32_t reserved[5]; // 44
+    // Written by the PAGE: which breakdowns its stats panel is showing right
+    // now (BRIDGE_DETAIL_* bits). The app and the renderer only spend time
+    // measuring the detail that is asked for; this is not a running total.
+    _Atomic uint32_t detail; // 44
+
+    // Written by the app: the part of step_work_us spent inside Box3D's step
+    // (b3World_Step, which runs on `solver_threads` threads). The page shows
+    // it as the physics time, and the rest of step_work_us as the app's own.
+    _Atomic uint32_t physics_step_us; // 48  total microseconds (wraps)
+
+    uint32_t reserved[3]; // 52
 } bridge_stats;           // 64
+
+// bridge_stats.detail
+enum {
+    BRIDGE_DETAIL_APP = 1u << 0,      // the app's step phases
+    BRIDGE_DETAIL_RENDERER = 1u << 1, // the renderer's frame phases and CPU time per pass
+    BRIDGE_DETAIL_GPU = 1u << 2,      // GPU time per pass
+    BRIDGE_DETAIL_PHYSICS = 1u << 3,  // the stages of Box3D's step
+};
+
+// ── Timing table (breakdowns for the stats panel) ──────────────────────────
+//
+// One named running total per entry. The app owns entries
+// [0, BRIDGE_TIMING_APP_SLOTS), the renderer the rest; each side only writes
+// its own. An owner writes `name` first and `kind` last, so a reader that
+// sees a kind sees the whole name. The page shows the change in `total_ns`
+// divided by the change in `count` between two samples.
+//
+// The capacity can grow freely (rule 1). BRIDGE_TIMING_APP_SLOTS is the one
+// number here the renderer has compiled in: changing it needs a renderer
+// rebuild, which the mirror check (tools/check-bridge.mjs) insists on.
+
+#define BRIDGE_TIMING_CAPACITY 96u
+#define BRIDGE_TIMING_APP_SLOTS 24u
+
+// bridge_timing.kind: what the entry measures, which is also where the page
+// shows it.
+enum {
+    BRIDGE_TIMING_UNUSED = 0,
+    BRIDGE_TIMING_APP_PHASE = 1,      // a part of the app's step            (per step)
+    BRIDGE_TIMING_RENDERER_PHASE = 2, // a part of the renderer's frame      (per frame)
+    BRIDGE_TIMING_RENDERER_PASS = 3,  // CPU time inside one render pass     (per frame)
+    BRIDGE_TIMING_GPU_PASS = 4,       // GPU time of one render pass         (per frame)
+    // What timing the passes costs the renderer, averaged over every frame.
+    // The renderer's per-pass timers are far from free, so they run on some
+    // frames only: the PHASE entries come from the frames without them, the
+    // PASS entries from the frames with them (with the timers' own share
+    // taken out), and this is the difference. See renderer/src/profile.rs.
+    BRIDGE_TIMING_RENDERER_OVERHEAD = 5, //                                  (per frame)
+    BRIDGE_TIMING_PHYSICS_STAGE = 6,     // a stage of Box3D's step          (per step)
+    BRIDGE_TIMING_PHYSICS_SOLVE = 7,     // a part of its solve stage        (per step)
+};
+
+typedef struct bridge_timing {
+    _Atomic uint32_t kind;     //  0  BRIDGE_TIMING_*
+    _Atomic uint32_t total_ns; //  4  running total, nanoseconds (wraps)
+    _Atomic uint32_t count;    //  8  steps or frames that total covers (wraps)
+    char name[52];             // 12  ASCII, padded with zero bytes
+} bridge_timing;               // 64
 
 // ── Snapshot ring (app → renderer) ─────────────────────────────────────────
 
@@ -489,6 +557,7 @@ static_assert(offsetof(bridge_header, ring_header_size) == 88, "bridge_header.ri
 static_assert(offsetof(bridge_header, record_size) == 92, "bridge_header.record_size");
 static_assert(offsetof(bridge_header, frame_time_us) == 96, "bridge_header.frame_time_us");
 static_assert(offsetof(bridge_header, frame_time_valid) == 100, "bridge_header.frame_time_valid");
+static_assert(offsetof(bridge_header, timing_offset) == 104, "bridge_header.timing_offset");
 
 static_assert(sizeof(bridge_input) == 64, "bridge_input size");
 static_assert(offsetof(bridge_input, canvas_width) == 8, "bridge_input.canvas_width");
@@ -503,6 +572,8 @@ static_assert(offsetof(bridge_stats, display_lag) == 28, "bridge_stats.display_l
 static_assert(offsetof(bridge_stats, solver_threads) == 32, "bridge_stats.solver_threads");
 static_assert(offsetof(bridge_stats, frame_span_us) == 36, "bridge_stats.frame_span_us");
 static_assert(offsetof(bridge_stats, app_late) == 40, "bridge_stats.app_late");
+static_assert(offsetof(bridge_stats, detail) == 44, "bridge_stats.detail");
+static_assert(offsetof(bridge_stats, physics_step_us) == 48, "bridge_stats.physics_step_us");
 
 static_assert(sizeof(bridge_camera) == 48, "bridge_camera size");
 static_assert(sizeof(bridge_pose) == 32, "bridge_pose size");
@@ -521,6 +592,7 @@ static_assert(offsetof(bridge_ring, capacity) == 8, "bridge_ring.capacity");
 static_assert(offsetof(bridge_ring, dropped) == 12, "bridge_ring.dropped");
 
 static_assert(sizeof(bridge_record) == 64, "bridge_record size");
+static_assert(sizeof(bridge_timing) == 64, "bridge_timing size");
 static_assert(offsetof(bridge_record, u) == 8, "bridge_record payload");
 
 static_assert((BRIDGE_SNAPSHOT_COUNT & (BRIDGE_SNAPSHOT_COUNT - 1u)) == 0,
@@ -560,6 +632,19 @@ void bridge_destroy(bridge_header *bridge);
 
 bridge_input *bridge_get_input(bridge_header *bridge);
 bridge_stats *bridge_get_stats(bridge_header *bridge);
+
+// ── Timing table ──
+
+// Which breakdowns the page's stats panel is showing (BRIDGE_DETAIL_* bits).
+uint32_t bridge_detail(bridge_header *bridge);
+
+// Names entry `slot` (below BRIDGE_TIMING_APP_SLOTS) and says what it
+// measures (a BRIDGE_TIMING_* kind). Call once, before the first
+// bridge_timing_add() for it.
+void bridge_timing_name(bridge_header *bridge, uint32_t slot, uint32_t kind, const char *name);
+
+// Adds one step's `milliseconds` to entry `slot`.
+void bridge_timing_add(bridge_header *bridge, uint32_t slot, double milliseconds);
 bridge_ring *bridge_get_ring(bridge_header *bridge, int which); // BRIDGE_RING_*
 
 // ── Event rings ──

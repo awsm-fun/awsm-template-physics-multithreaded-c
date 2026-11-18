@@ -187,6 +187,17 @@ typedef struct app_state {
     // app_reload_scene() was called: what the renderer still says about the
     // old scene is ignored until the description of the fresh one begins.
     bool reload_pending;
+
+    // For the page's stats panel (see "Timing" in app.c). The run loop sets
+    // the two flags while the panel has that breakdown open, and only then:
+    // `profile` times the phases of the app's own code, `profile_physics`
+    // passes on the stages of Box3D's step.
+    bool profile;
+    bool profile_physics;
+    uint64_t lap_ticks; // where the phase being timed began
+    // Time inside Box3D's step since the run loop last took it (it is always
+    // measured: the panel's physics headline).
+    double physics_ms;
 } app_state;
 
 // Sets up `app` to talk through `bridge` (which must outlive it) and creates

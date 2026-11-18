@@ -1,88 +1,100 @@
 // stats.js — the stats panel (top right) and the Stats button (bottom left)
 // that shows and hides it.
 //
-// Once a second it samples the counters the app and the renderer keep in the
-// bridge block's stats section (see bridge_stats in app/src/bridge.h): no
-// messages, nothing measured here. What it shows:
+// One group per thread, so that every number sits under the thread that
+// spent it, and every number says its unit and what it is per:
 //
-//   display       the display's refresh rate, as the browser's frame clock
-//                 runs it: measured here, from this thread's own
-//                 requestAnimationFrame timestamps (see measureRefresh). On
-//                 a Mac with screens of different rates, this is the rate
-//                 Chrome paces the window at, which is what matters here.
-//   render        frames presented per second. This is capped by the
-//                 display (60 on a 60 Hz screen, 120 on a 120 Hz one).
-//   missed        display refreshes that went by without a new frame, in
-//                 the last sample and in total since the app started: the
-//                 renderer's frames were too slow (or arrived unevenly) for
-//                 the display. Any steady count here is visible stutter;
-//                 lower the resolution or the anti-aliasing in Settings.
-//                 Counted exactly: the renderer sums the time between its
-//                 frames' timestamps (frame_span_us), and that time divided
-//                 by the refresh period is how many refreshes went by.
-//   gpu time      the GPU's time per frame, from the renderer's timestamp
-//                 queries: the number that says whether a frame can make the
-//                 display's refresh (8.3 ms at 120 Hz). `n/a` on a GPU
-//                 without timestamp queries.
-//   cpu time      the render worker's CPU time per frame: what a frame
-//                 costs, whatever the display's refresh rate.
-//   physics time  the app's CPU time per fixed step (stepping Box3D and the
-//                 rest of app_step). At 240 steps a second the budget is
-//                 about 4.2 ms; watch it grow as balls pile up.
-//   physics       fixed steps per second (240 when all is well).
-//   app late      frames the renderer drew before the app had published the
-//                 moment they show, in the last sample and in total: the
-//                 app's burst of steps did not finish within a frame, so the
-//                 frame held the newest step and the next one catches up
-//                 (bridge.h, "Frame pacing"). 0 when all is well. The line
-//                 turns red when it happens in LATE_WINDOWS samples in a row:
-//                 a steady condition, not a one-off (a tab switch, an
-//                 anti-aliasing recompile).
-//   box3d         how many threads Box3D steps the world on, counting the
-//                 app's own (web_main.c decides, from the number of cores).
-//   balls dropped the balls on the table besides the red one.
-//   last cue      the latest impact cue from the app, and its intensity.
+//   display                    the display's refresh rate (measured here, from
+//                              this thread's own animation frames), the frames
+//                              the renderer presented per second, and the
+//                              refreshes that went by without a new frame.
+//   GPU                        the GPU's time per frame, from the renderer's
+//                              timestamp queries (`n/a` without them). Its
+//                              rows are the passes; on GPUs that run passes
+//                              overlapped (Apple's) they add up to more than
+//                              the frame.
+//   renderer (render worker)   the render worker's CPU time per frame.
+//   app (C, app worker)        the app's own CPU time per fixed step (the
+//                              step without Box3D's part), its steps per
+//                              second, and the frames the renderer drew
+//                              before the app had published the moment they
+//                              show ("late": bridge.h, "Frame pacing").
+//   physics (Box3D, N threads) the time of Box3D's step, which the app
+//                              worker runs together with the solver threads.
+//                              At 240 steps a second the two together have
+//                              about 4.2 ms; watch this grow as balls pile up.
+//   page (main thread)         this thread's own work per frame.
 //
-// Rates are counter differences divided by the REAL time between samples
-// (performance.now()), then smoothed. A one-second timer is not really one
-// second apart, and in a background tab it is throttled, so assuming 1000 ms
-// makes the numbers flicker, or go absurd around a tab switch.
+// A group's header always shows its headline number. Expanding a group shows
+// its breakdown, and only then is the breakdown measured: the page sets a bit
+// in the bridge block (`detail`), and the app and the renderer time their
+// phases and passes only while it is set. A collapsed panel costs nothing.
+//
+// Once a second the panel samples the running totals the app and the renderer
+// keep in the bridge block (bridge_stats and the timing table in
+// app/src/bridge.h): no messages. Every figure is the change in a total
+// divided by the change in what it is per (frames, steps, or REAL seconds:
+// a one-second timer is not exactly a second apart, and is throttled in a
+// background tab), then smoothed.
 
+import { DETAIL, TIMING } from './bridge.js';
 import { STATS_STORAGE_KEY, coarsePointer, storeBool, storedBool } from './settings.js';
 
 const SAMPLE_INTERVAL_MS = 1000;
-// Smoothing weight of each new sample: a real change (a lower resolution, a
-// pile of balls) shows within 2–3 samples, while the readout holds steady
-// against noise.
+// Smoothing weight of each new sample: a real change shows within 2–3
+// samples, while the readout holds steady against noise.
 const EMA_ALPHA = 0.35;
 // A sample window is only trusted between these lengths (ms). Shorter: two
 // timer callbacks ran almost together, and the quotient is noise. Longer: the
-// tab was hidden or throttled, so frames were not running and the window
-// measures the stall. Either way the next window starts afresh.
+// tab was hidden or throttled, and the window measures the stall.
 const MIN_WINDOW_MS = 200;
 const MAX_WINDOW_MS = 3000;
-// The app-late line turns red when the app was late in this many sample
-// windows in a row.
+// The late-frames line turns red when the app was late in this many sample
+// windows in a row: a steady condition, not a one-off such as a tab switch.
 const LATE_WINDOWS = 3;
-// Frames that must be presented after the renderer reports `ready` before
-// anything is counted. Start-up is not steady state (the loading screen is
-// fading, caches are cold, the wasm engine is still optimizing) and those
-// first samples read 2–3 times the settled cost. Counted in frames, not time,
-// so a stalled renderer keeps waiting instead of "warming up" through the
-// stall.
+// Frames presented after the renderer reports `ready` before anything is
+// counted: start-up (cold caches, the wasm engine still optimizing) reads
+// several times the settled cost. Counted in frames, not time, so a stalled
+// renderer keeps waiting instead of "warming up" through the stall.
 const WARMUP_FRAMES = 60;
-// The refresh period is the typical gap between this thread's animation
-// frames: of the last REFRESH_SAMPLES gaps, the mean of those within
-// REFRESH_INLIER of the median (a frame this thread itself missed, or a gap
-// around a tab switch, is not a refresh). Two seconds of history at 60 Hz, so
-// moving the window to a screen with another rate shows within a moment.
+// The refresh period is the mean of the last REFRESH_SAMPLES gaps between
+// this thread's animation frames, ignoring gaps more than REFRESH_INLIER away
+// from the median (a frame this thread missed, a tab switch).
 const REFRESH_SAMPLES = 120;
 const REFRESH_MIN_SAMPLES = 30;
 const REFRESH_INLIER = 0.15;
-// A window whose frame span is longer than the window itself by more than
-// this (ms) contains a pause from before it (a hidden tab, a debugger stop):
-// a pause is not missed frames, so the window is not counted.
+// A window whose frame span exceeds the window itself by more than this (ms)
+// contains a pause from before it (a hidden tab, a debugger stop), which is
+// not missed frames: the window is not counted.
 const PAUSE_SLACK_MS = 250;
+
+// The groups, top to bottom. `detail`: the bit that asks the other threads to
+// measure this group's breakdown while it is expanded.
+const GROUPS = [
+  { id: 'display', label: 'display' },
+  { id: 'gpu', label: 'GPU', detail: DETAIL.GPU },
+  { id: 'renderer', label: 'renderer (render worker)', detail: DETAIL.RENDERER },
+  { id: 'app', label: 'app (C, app worker)', detail: DETAIL.APP },
+  // The label gains the thread count once the app has reported it.
+  { id: 'physics', label: 'physics (Box3D)', detail: DETAIL.PHYSICS },
+  { id: 'page', label: 'page (main thread)' },
+];
+
+// The renderer's phase whose time its per-pass rows are a breakdown of, and
+// the same for Box3D's stage and the parts of its solver.
+const RENDER_PHASE = 'render (encode + submit)';
+const SOLVE_STAGE = 'solve';
+
+// A duration with its unit: microseconds below a tenth of a millisecond.
+function duration(ms) {
+  if (ms < 0.09995) {
+    const us = ms * 1000;
+    return `${us < 9.95 ? us.toFixed(1) : us.toFixed(0)} µs`;
+  }
+  return `${ms < 9.995 ? ms.toFixed(2) : ms.toFixed(1)} ms`;
+}
+
+const smooth = (ema, value) => (ema == null ? value : ema + (value - ema) * EMA_ALPHA);
 
 // Measures the display's refresh period from this thread's own animation
 // frames. This thread does little per frame, so it keeps up with the display
@@ -122,43 +134,89 @@ function measureRefresh() {
   };
 }
 
-// The panel's first lines, which never change, and what follows them until
-// there are numbers to show.
-const HEAD_MAIN = 'workers\n  main          ui · audio · input\n';
-const HEAD_STARTING = `${HEAD_MAIN}  render        starting…\n  physics       starting…`;
-const HEAD_WARMING = `${HEAD_MAIN}  render        warming up…\n  physics       warming up…`;
+// Builds the panel's elements: per group, a header button (label left,
+// headline right) and the rows it shows while expanded. Returns
+// { set(id, headline, rows, bad), label(id, text), detail(), onToggle }.
+function buildGroups(panel) {
+  const parts = new Map();
+  const view = { onToggle: () => {} };
+  for (const group of GROUPS) {
+    const key = `${STATS_STORAGE_KEY}_open_${group.id}`;
+    const header = document.createElement('button');
+    header.type = 'button';
+    header.className = 'stats-group';
+    const label = document.createElement('span');
+    const headline = document.createElement('span');
+    header.append(label, ' ', headline); // the space is for a screen reader
+    const rows = document.createElement('div');
+    rows.className = 'stats-rows';
+    rows.id = `stats-rows-${group.id}`;
+    header.setAttribute('aria-controls', rows.id);
+
+    const part = { group, open: false, header, headline, rows, label: group.label };
+    part.showLabel = () => {
+      label.textContent = `${part.open ? '▾' : '▸'} ${part.label}`;
+    };
+    const setOpen = (open) => {
+      part.open = open;
+      rows.hidden = !open;
+      header.setAttribute('aria-expanded', String(open));
+      part.showLabel();
+    };
+    setOpen(storedBool(key) === true); // collapsed unless the user opened it
+    header.addEventListener('click', () => {
+      setOpen(!part.open);
+      storeBool(key, part.open);
+      view.onToggle();
+    });
+    parts.set(group.id, part);
+    panel.append(header, rows);
+  }
+
+  // `rows`: [label, value] pairs; a third `true` indents a row one level
+  // (a breakdown of the row above), and a fourth marks it bad (red).
+  view.set = (id, headline, rows = [], bad = false) => {
+    const part = parts.get(id);
+    part.headline.textContent = headline;
+    part.header.classList.toggle('stats-bad', bad);
+    if (!part.open) return;
+    part.rows.replaceChildren(
+      ...rows.map(([label, value, nested, rowBad]) => {
+        const row = document.createElement('div');
+        row.className = `stats-row${nested ? ' stats-nested' : ''}${rowBad ? ' stats-bad' : ''}`;
+        const name = document.createElement('span');
+        name.textContent = label;
+        const figure = document.createElement('span');
+        figure.textContent = value;
+        row.append(name, figure);
+        return row;
+      }),
+    );
+  };
+  view.label = (id, text) => {
+    const part = parts.get(id);
+    if (part.label === text) return;
+    part.label = text;
+    part.showLabel();
+  };
+  // The DETAIL bits of the groups that are expanded.
+  view.detail = () => {
+    let bits = 0;
+    for (const part of parts.values()) if (part.open) bits |= part.group.detail ?? 0;
+    return bits;
+  };
+  return view;
+}
 
 // `getBridge()` returns the current app's Bridge (or null while there is
 // none); `getLastCue()` the latest impact cue as { name, intensity }, or null.
-// Returns { markReady() }, to call when the renderer reports `ready`.
+// Returns { markReady(), pageFrame(ms) }: call the first when the renderer
+// reports `ready`, the second once per animation frame with the time this
+// thread spent on it.
 export function installStats({ getBridge, getLastCue }) {
   const panel = document.getElementById('stats');
-  const head = document.getElementById('stats-head');
-  const lateLine = document.getElementById('stats-late');
-  const tail = document.getElementById('stats-tail');
   const button = document.getElementById('stats-btn');
-
-  // Off by default: on a phone the panel covers a lot of the screen. A stored
-  // "open" is only honoured on a desktop; on a touch device the button still
-  // opens it for the session.
-  const setOpen = (open) => {
-    panel.hidden = !open;
-    button.classList.toggle('active', open);
-  };
-  setOpen(!coarsePointer() && storedBool(STATS_STORAGE_KEY) === true);
-  button.addEventListener('click', () => {
-    const open = panel.hidden;
-    setOpen(open);
-    storeBool(STATS_STORAGE_KEY, open);
-  });
-
-  const show = (headText, late = '', bad = false, tailText = '') => {
-    head.textContent = headText;
-    lateLine.textContent = late;
-    lateLine.classList.toggle('stats-bad', bad);
-    tail.textContent = tailText;
-  };
-  show(HEAD_STARTING);
+  const view = buildGroups(panel);
 
   const refresh = measureRefresh();
   let renderReady = false;
@@ -167,10 +225,13 @@ export function installStats({ getBridge, getLastCue }) {
   let fpsEma = null;
   let stepsEma = null;
   let frameWorkEma = null;
-  let stepWorkEma = null;
+  let stepWorkEma = null; // the app's own part of a step
+  let physicsEma = null; // Box3D's part
+  let balls = 0;
   let gpuEma = null;
+  let pageEma = null;
   // Trusted windows in a row without a single GPU sample: after a few, the
-  // device evidently has no timestamp queries, and the line says so.
+  // device evidently has no timestamp queries, and the group says so.
   let gpuEmptyWindows = 0;
   // Frames the app was late for: the total since counting started, and how
   // many windows in a row had any.
@@ -184,11 +245,135 @@ export function installStats({ getBridge, getLastCue }) {
   let missedTotal = 0;
   // frameCount when counting could first start (see WARMUP_FRAMES).
   let warmFrame = null;
+  // The timing table: each entry's previous reading and its smoothed mean,
+  // by entry.
+  let timingBaseline = new Map();
+  const timingMeans = new Map();
+  // This thread's own work, summed between samples.
+  let pageMs = 0;
+  let pageFrames = 0;
+
+  // The breakdowns are only measured while the panel shows them: tell the
+  // other threads which groups are expanded (none while the panel is hidden).
+  const publishDetail = () => getBridge()?.setDetail(panel.hidden ? 0 : view.detail());
+  view.onToggle = () => {
+    publishDetail();
+    render(); // the rows of a group just opened fill in on the next sample
+  };
+
+  // Off by default: on a phone the panel covers a lot of the screen. A stored
+  // "open" is only honoured on a desktop; on a touch device the button still
+  // opens it for the session.
+  const setOpen = (open) => {
+    panel.hidden = !open;
+    button.classList.toggle('active', open);
+    publishDetail();
+  };
+  setOpen(!coarsePointer() && storedBool(STATS_STORAGE_KEY) === true);
+  button.addEventListener('click', () => {
+    const open = panel.hidden;
+    setOpen(open);
+    storeBool(STATS_STORAGE_KEY, open);
+  });
 
   // A hidden tab runs no frames: never turn that gap into a rate.
   document.addEventListener('visibilitychange', () => {
     baseline = null;
   });
+
+  // What the panel shows until there are numbers.
+  let placeholder = 'starting…';
+  let late = { rate: 0, bad: false };
+
+  // The timing-table rows of one kind: [name, mean in ms], in table order.
+  const timings = (kind) =>
+    [...timingMeans.values()].filter((entry) => entry.kind === kind && entry.ms != null);
+  const slowestFirst = (entries) => entries.sort((a, b) => b.ms - a.ms);
+
+  function render() {
+    if (placeholder) {
+      for (const group of GROUPS) view.set(group.id, group.id === 'display' ? '—' : placeholder);
+      return;
+    }
+    const periodMs = refresh.periodMs();
+    const hz = periodMs === null ? null : `${(1000 / periodMs).toFixed(0)} Hz`;
+    const fps = `${fpsEma.toFixed(0)}`;
+    view.set('display', `${hz ?? 'measuring…'} · ${fps} fps`, [
+      ['refresh rate', hz ?? 'measuring…'],
+      ['frames presented', `${fps} / s`],
+      [
+        'missed frames',
+        missedRate === null ? '—' : `${missedRate.toFixed(0)} / s · ${Math.max(missedTotal, 0)} total`,
+      ],
+    ]);
+
+    let gpu = '—';
+    if (gpuEma !== null) gpu = `${duration(gpuEma)} / frame`;
+    else if (gpuEmptyWindows >= 3) gpu = 'n/a';
+    view.set(
+      'gpu',
+      gpu,
+      slowestFirst(timings(TIMING.GPU_PASS)).map((pass) => [pass.name, `${duration(pass.ms)} / frame`]),
+    );
+
+    // The renderer's phases in the order they run, with its CPU time inside
+    // each pass listed under the phase that encodes them.
+    const rendererRows = [];
+    const passes = slowestFirst(timings(TIMING.RENDERER_PASS));
+    for (const phase of timings(TIMING.RENDERER_PHASE)) {
+      rendererRows.push([phase.name, `${duration(phase.ms)} / frame`]);
+      if (phase.name !== RENDER_PHASE || passes.length === 0) continue;
+      for (const pass of passes) rendererRows.push([pass.name, `${duration(pass.ms)} / frame`, true]);
+      // What render() spends that no pass accounts for: per-frame uploads,
+      // culling, bookkeeping.
+      const inPasses = passes.reduce((sum, pass) => sum + pass.ms, 0);
+      rendererRows.push([
+        'outside the passes',
+        `${duration(Math.max(phase.ms - inPasses, 0))} / frame`,
+        true,
+      ]);
+    }
+    // The renderer's per-pass timers are costly, so it runs them on some
+    // frames only and reports what they add to the average frame: the one
+    // part of the headline that is there because the group is open.
+    for (const overhead of timings(TIMING.RENDERER_OVERHEAD)) {
+      rendererRows.push([`${overhead.name} (only while open)`, `${duration(overhead.ms)} / frame`]);
+    }
+    view.set(
+      'renderer',
+      frameWorkEma === null ? '—' : `${duration(frameWorkEma)} / frame`,
+      rendererRows,
+    );
+
+    const cue = getLastCue();
+    view.set(
+      'app',
+      stepWorkEma === null ? '—' : `${duration(stepWorkEma)} / step`,
+      [
+        ['steps', `${stepsEma.toFixed(0)} steps/s`],
+        ['late frames', `${late.rate.toFixed(0)} / s · ${lateTotal} total`, false, late.bad],
+        ...timings(TIMING.APP_PHASE).map((phase) => [phase.name, `${duration(phase.ms)} / step`]),
+        ['balls dropped', `${balls}`],
+        ['last cue', cue ? `${cue.name} ${cue.intensity.toFixed(2)}` : '—'],
+      ],
+      late.bad,
+    );
+
+    // Box3D's stages in the order they run, with the parts of its solver
+    // under the solve stage.
+    const physicsRows = [];
+    const solverParts = timings(TIMING.PHYSICS_SOLVE);
+    for (const stage of timings(TIMING.PHYSICS_STAGE)) {
+      physicsRows.push([stage.name, `${duration(stage.ms)} / step`]);
+      if (stage.name !== SOLVE_STAGE) continue;
+      for (const part of solverParts) physicsRows.push([part.name, `${duration(part.ms)} / step`, true]);
+    }
+    view.set('physics', physicsEma === null ? '—' : `${duration(physicsEma)} / step`, physicsRows);
+
+    // All this thread does per frame is in main.js's frame(): one row.
+    const page = pageEma === null ? '—' : `${duration(pageEma)} / frame`;
+    view.set('page', page, [['frame marks + sound cues', page]]);
+  }
 
   function sample() {
     const now = performance.now();
@@ -198,22 +383,37 @@ export function installStats({ getBridge, getLastCue }) {
       // from zero, so nothing measured against the old one carries over.
       bridge = current;
       baseline = null;
-      fpsEma = stepsEma = frameWorkEma = stepWorkEma = gpuEma = null;
+      fpsEma = stepsEma = frameWorkEma = stepWorkEma = physicsEma = gpuEma = null;
       gpuEmptyWindows = 0;
       lateTotal = 0;
       lateWindows = 0;
       missedRate = null;
       missedTotal = 0;
       warmFrame = null;
+      timingBaseline = new Map();
+      timingMeans.clear();
+      publishDetail(); // the new block has not been told yet
     }
     if (!bridge) {
-      show(HEAD_STARTING);
+      placeholder = 'starting…';
+      render();
       return;
     }
 
     const stats = bridge.readStats();
+    // Threads Box3D steps the world on, counting the app's (0: an app from
+    // before it reported them).
+    const threads = stats.solverThreads;
+    if (threads > 0) {
+      view.label('physics', `physics (Box3D, ${threads} thread${threads === 1 ? '' : 's'})`);
+    }
     const previous = baseline;
     baseline = { at: now, ...stats };
+    const previousTimings = timingBaseline;
+    timingBaseline = new Map(bridge.readTimings().map((entry) => [entry.slot, entry]));
+    const page = { ms: pageMs, frames: pageFrames };
+    pageMs = 0;
+    pageFrames = 0;
 
     // Nothing is counted until the renderer is drawing for real, and then
     // only after WARMUP_FRAMES more frames. The baseline above keeps moving,
@@ -221,19 +421,20 @@ export function installStats({ getBridge, getLastCue }) {
     if (!renderReady) return; // still "starting…"
     warmFrame ??= stats.frameCount;
     if (((stats.frameCount - warmFrame) >>> 0) < WARMUP_FRAMES) {
-      show(HEAD_WARMING);
+      placeholder = 'warming up…';
+      render();
       return;
     }
     // No trustworthy window (the first sample, or a jittered or throttled
-    // gap): the baseline has been reset above; keep the last text up.
+    // gap): the baseline has been reset above; keep the last figures up.
     if (!previous || !(now - previous.at >= MIN_WINDOW_MS && now - previous.at < MAX_WINDOW_MS)) {
       return;
     }
+    placeholder = null;
     const seconds = (now - previous.at) / 1000;
 
     const frames = (stats.frameCount - previous.frameCount) >>> 0;
     const steps = (stats.latestStep - previous.latestStep) >>> 0;
-    const smooth = (ema, value) => (ema === null ? value : ema + (value - ema) * EMA_ALPHA);
     fpsEma = smooth(fpsEma, frames / seconds);
     stepsEma = smooth(stepsEma, steps / seconds);
     // Average CPU ms per frame and per step over the window. With no frame
@@ -242,10 +443,16 @@ export function installStats({ getBridge, getLastCue }) {
       const ms = ((stats.frameWorkUs - previous.frameWorkUs) >>> 0) / frames / 1000;
       frameWorkEma = smooth(frameWorkEma, ms);
     }
+    // The step in two parts: Box3D's, and the rest, which is the app's own.
+    // (An app from before the split reports no physics time: all is the app's.)
     if (steps > 0) {
-      const ms = ((stats.stepWorkUs - previous.stepWorkUs) >>> 0) / steps / 1000;
-      stepWorkEma = smooth(stepWorkEma, ms);
+      const stepMs = ((stats.stepWorkUs - previous.stepWorkUs) >>> 0) / steps / 1000;
+      const physicsMs = ((stats.physicsStepUs - previous.physicsStepUs) >>> 0) / steps / 1000;
+      stepWorkEma = smooth(stepWorkEma, Math.max(stepMs - physicsMs, 0));
+      physicsEma = smooth(physicsEma, physicsMs);
     }
+    balls = Math.max(stats.activePoses - 1, 0); // besides the red one
+    if (page.frames > 0) pageEma = smooth(pageEma, page.ms / page.frames);
     // Average GPU ms per SAMPLED frame: the readback skips frames while one
     // is in flight, so this divides by GPU samples, not by frames.
     const gpuFrames = (stats.gpuFrameCount - previous.gpuFrameCount) >>> 0;
@@ -265,54 +472,40 @@ export function installStats({ getBridge, getLastCue }) {
       missedTotal += missed;
       missedRate = Math.max(missed, 0) / seconds;
     }
-    const displayText = periodMs === null ? 'measuring…' : `${(1000 / periodMs).toFixed(0)} Hz`;
-    const missedText =
-      missedRate === null
-        ? '—'
-        : `${missedRate.toFixed(0)}/s · ${Math.max(missedTotal, 0)} total`;
 
-    let gpuText = '—';
-    if (gpuEma !== null) gpuText = `${gpuEma.toFixed(1)} ms`;
-    else if (gpuEmptyWindows >= 3) gpuText = 'n/a';
-    const cpuText = (ema, digits) => (ema === null ? '—' : `${ema.toFixed(digits)} ms`);
+    const lateFrames = (stats.appLate - previous.appLate) >>> 0;
+    lateTotal += lateFrames;
+    lateWindows = lateFrames > 0 ? lateWindows + 1 : 0;
+    late = { rate: lateFrames / seconds, bad: lateWindows >= LATE_WINDOWS };
 
-    const headText =
-      HEAD_MAIN +
-      `  display       ${displayText}\n` +
-      `  render        ${fpsEma.toFixed(0)} fps\n` +
-      `  missed        ${missedText}\n` +
-      `  gpu time      ${gpuText}\n` +
-      `  cpu time      ${cpuText(frameWorkEma, 1)}\n` +
-      `  physics time  ${cpuText(stepWorkEma, 2)}\n` +
-      `  physics       ${stepsEma.toFixed(0)} steps/s\n`;
-
-    const late = (stats.appLate - previous.appLate) >>> 0;
-    lateTotal += late;
-    const lateRate = late / seconds;
-    lateWindows = late > 0 ? lateWindows + 1 : 0;
-    const bad = lateWindows >= LATE_WINDOWS;
-    const lateText = `  app late      ${lateRate.toFixed(0)}/s · ${lateTotal} total`;
-
-    let tailText = '';
-    // 0 from an app built before the field existed: then say nothing.
-    const threads = stats.solverThreads;
-    if (threads > 0) {
-      tailText += `\n  box3d         ${threads} thread${threads === 1 ? '' : 's'}`;
+    // The breakdowns: each entry's mean over the window. An entry that did
+    // not advance is no longer being measured (its group was collapsed, or
+    // the pass did not run), so it drops out rather than show a stale figure.
+    for (const [slot, entry] of timingBaseline) {
+      const before = previousTimings.get(slot);
+      const count = before ? (entry.count - before.count) >>> 0 : 0;
+      if (count === 0) {
+        timingMeans.delete(slot);
+        continue;
+      }
+      const ms = ((entry.totalNs - before.totalNs) >>> 0) / count / 1e6;
+      const mean = timingMeans.get(slot);
+      timingMeans.set(slot, { kind: entry.kind, name: entry.name, ms: smooth(mean?.ms, ms) });
     }
-    // Every active pose but slot 0, which is the red ball (APP_PLAYER_SLOT in
-    // app/src/app.h).
-    tailText += `\n\nballs dropped  ${Math.max(stats.activePoses - 1, 0)}`;
-    const cue = getLastCue();
-    tailText += `\nlast cue       ${cue ? `${cue.name} ${cue.intensity.toFixed(2)}` : '-'}`;
 
-    show(headText, lateText, bad, tailText);
+    render();
   }
 
+  render();
   setInterval(sample, SAMPLE_INTERVAL_MS);
 
   return {
     markReady() {
       renderReady = true;
+    },
+    pageFrame(ms) {
+      pageMs += ms;
+      pageFrames += 1;
     },
   };
 }

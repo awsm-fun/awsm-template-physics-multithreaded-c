@@ -19,9 +19,9 @@
     <div id="ui">
       <div class="hud" id="hud" aria-live="off"></div>
 
-      <!-- Top right, opt-in through the Stats button (stats.js). Three parts
-           so that just the app-late line can turn red. -->
-      <div class="stats" id="stats" hidden><span id="stats-head"></span><span id="stats-late"></span><span id="stats-tail"></span></div>
+      <!-- Top right, opt-in through the Stats button. stats.js fills it with
+           one collapsible group per thread. -->
+      <div class="stats" id="stats" hidden></div>
 
       <!-- Outside the canvas, so pressing them never drops a ball. -->
       <button class="stats-btn" id="stats-btn" type="button">Stats</button>
@@ -61,9 +61,10 @@
             to your view from any angle.
           </p>
           <p>
-            The stats panel (the Stats button, bottom left) shows each thread live: the
-            renderer's frame rate and its GPU and CPU time per frame, the app's CPU time per
-            physics step, and whether the picture keeps in step with the simulation. Box3D runs
+            The stats panel (the Stats button, bottom left) shows each thread live, one group
+            per thread: the renderer's frame rate and its GPU and CPU time per frame, the app's
+            and Box3D's time per physics step, and whether the picture keeps in step with the
+            simulation; click a group for its breakdown. Box3D runs
             its solver on the app's thread plus up to four more (Emscripten pthreads sharing the
             app's memory, scheduled by Box3D itself). Drop more balls and watch the physics time
             grow.

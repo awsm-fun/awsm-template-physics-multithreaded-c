@@ -49,19 +49,33 @@ each as loud as the impact was hard and placed in stereo where it happened. It
 starts on the first key or pointer press, as browsers require.
 
 Over the canvas: the controls, whether sound is on and a status line (top
-left); a **Stats** panel (bottom-left button) with the display's refresh rate,
-frames per second, missed frames (refreshes that went by with no new frame:
-any steady count is visible stutter), the GPU and CPU time per frame, the
-app's CPU time per simulation step, steps per second, frames the app was late
-for (its steps did not finish within a frame), Box3D's thread count, the
-number of dropped balls and the last impact cue; **About** (bottom
-centre); and **Settings** (bottom right): the render resolution and the
+left); a **Stats** panel (bottom-left button, described below); **About**
+(bottom centre); and **Settings** (bottom right): the render resolution and the
 anti-aliasing (Off, SMAA, 4× MSAA). The resolution starts at native, held to
 a budget of 2.8 million pixels (so a big high-DPI window starts below 100%);
 touch devices and software GPUs start lower. Choices are remembered in
 `localStorage` and always win; `?reset` in the URL forgets them. The storage
 keys share one prefix (`STORAGE_PREFIX` in `dom/settings.js`): change it for
 your own project, since everything on the same origin shares `localStorage`.
+
+The Stats panel has one group per thread, so each number sits under the
+thread that spent it, with its unit and what it is per:
+
+| Group | Headline | Expanded |
+| --- | --- | --- |
+| display | refresh rate and frames per second | missed frames (refreshes with no new frame: any steady count is visible stutter) |
+| GPU | GPU time per frame | per render pass (on Apple GPUs the passes overlap, so they add up to more than the frame) |
+| renderer (render worker) | the render worker's CPU time per frame | its phases (reading the app's state, camera, transforms, `render()`) and, under `render()`, the CPU time inside each pass and outside all of them |
+| app (C, app worker) | the app's own CPU time per step, without Box3D's | steps per second, frames the app was late for (its steps did not finish within a frame), the phases of a step, dropped balls, the last impact cue |
+| physics (Box3D, N threads) | the time of Box3D's step, which the app worker runs together with the solver threads | Box3D's stages (pairs, collide, solve, sensors) and the parts of its solver |
+| page (main thread) | the main thread's work per frame | |
+
+A header toggles its group, and the choice is remembered. The breakdowns are
+only measured while their group is open (`renderer/src/profile.rs`, "Timing"
+in `app/src/app.c`), so a collapsed panel costs nothing extra. The renderer's
+per-pass CPU timers are expensive in a worker, so they run on one frame in
+sixteen, and what they add to the average frame is listed as "timing the
+passes".
 
 ## Quick start
 
@@ -127,6 +141,7 @@ setting up Linux; other browsers with WebGPU have not been tried.
  │             latest_step, section table                                      │
  │  input      held keys, pointer, canvas size              dom      → app     │
  │  stats      counters for the stats panel                 app, renderer → dom│
+ │  timings    named totals for the panel's breakdowns      app, renderer → dom│
  │  snapshots  ring of 32 world states (camera + poses)     app      → renderer│
  │  ring       key / pointer / wheel events, frame marks    dom      → app     │
  │  ring       scene description (colliders)                renderer → app     │
@@ -550,7 +565,7 @@ microseconds), which all three threads compute the same way.
    advances by exactly the time between frames, so motion is even however the
    steps fell into bursts (4, 4, 4 at 60 Hz; 1 or 2 at 144 Hz). If the app has
    not published that far yet, the renderer holds the newest step for a frame
-   and counts it as "app late" in the stats panel.
+   and counts a late frame for the app in the stats panel.
 
 Because the step count comes from the frame times, not from when the app's
 thread happens to wake, it does not wobble. Pacing the app from the display

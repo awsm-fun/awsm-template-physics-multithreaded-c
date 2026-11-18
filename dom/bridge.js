@@ -33,6 +33,9 @@ export const LAYOUT = {
     ring_offset: 72, // [4], indexed by ring_index
     ring_header_size: 88,
     record_size: 92,
+    timing_offset: 104,
+    timing_capacity: 108,
+    timing_stride: 112,
   },
   // bridge_input
   input: {
@@ -54,13 +57,30 @@ export const LAYOUT = {
     solver_threads: 32,
     frame_span_us: 36,
     app_late: 40,
+    detail: 44, // written by this page: the `detail` bits below
+    physics_step_us: 48,
+  },
+  // BRIDGE_DETAIL_*: the breakdowns the stats panel is showing.
+  detail: { APP: 1, RENDERER: 2, GPU: 4, PHYSICS: 8 },
+  // bridge_timing: one named running total of the timing table. `name_size`
+  // is the size of its name field.
+  timing: { kind: 0, total_ns: 4, count: 8, name: 12, name_size: 52 },
+  // BRIDGE_TIMING_*: what an entry measures.
+  timing_kind: {
+    APP_PHASE: 1,
+    RENDERER_PHASE: 2,
+    RENDERER_PASS: 3,
+    GPU_PASS: 4,
+    RENDERER_OVERHEAD: 5,
+    PHYSICS_STAGE: 6,
+    PHYSICS_SOLVE: 7,
   },
   // bridge_ring
   ring: { head: 0, tail: 4, capacity: 8, dropped: 12 },
   // bridge_record: `payload` is the u[14] / f[14] union.
   record: { type: 0, step: 4, payload: 8 },
   // sizeof(...), in bytes
-  size: { ring: 64, record: 64 },
+  size: { ring: 64, record: 64, timing: 64 },
   // BRIDGE_RING_*
   ring_index: { DOM_TO_APP: 0, APP_TO_DOM: 3 },
   // Record types: the dom → app events, and the app → dom cue.
@@ -99,6 +119,8 @@ export const LAYOUT = {
 
 export const KEY = LAYOUT.key;
 export const RECORD = LAYOUT.record_type;
+export const DETAIL = LAYOUT.detail;
+export const TIMING = LAYOUT.timing_kind;
 export const POINTER = LAYOUT.pointer;
 // The button of a press the browser cancelled (a touch that became a scroll).
 // No real button has this number, so the app ends the press without taking
@@ -111,6 +133,7 @@ const STATS = LAYOUT.stats;
 const RING = LAYOUT.ring;
 const RING_INDEX = LAYOUT.ring_index;
 const FIELD = LAYOUT.record;
+const TIMING_FIELD = LAYOUT.timing;
 const SIZE = LAYOUT.size;
 // 32-bit words in a record's payload (14).
 const PAYLOAD_WORDS = (SIZE.record - FIELD.payload) / 4;
@@ -187,6 +210,10 @@ export class Bridge {
   #recordSize;
   #ringHeaderSize;
   #record;
+  #timings; // the timing table, in bytes
+  #timingCapacity; // 0 from an app built before the table
+  #timingStride;
+  #timingNames = []; // by entry; a name never changes once its kind is set
   // Input has been sent since the last frame mark (see markFrame).
   #unmarked = false;
   // Scratch for turning a float into its bit pattern for an atomic store.
@@ -235,6 +262,20 @@ export class Bridge {
       throw new Error('bridge: the ring layout is smaller than this page expects');
     }
     this.#record = new RecordView(this.#u32, this.#f32);
+
+    const timings = this.#header(HEADER.timing_offset);
+    this.#timings = ptr + timings;
+    this.#timingCapacity = this.#header(HEADER.timing_capacity);
+    this.#timingStride = this.#header(HEADER.timing_stride);
+    if (
+      this.#timingCapacity > 0 &&
+      (this.#timingStride < SIZE.timing ||
+        this.#timings % 4 !== 0 ||
+        this.#timingStride % 4 !== 0 ||
+        timings + this.#timingCapacity * this.#timingStride > totalSize)
+    ) {
+      throw new Error('bridge: the timing table is inconsistent');
+    }
   }
 
   #header(byteOffset) {
@@ -413,7 +454,47 @@ export class Bridge {
       solverThreads: load(STATS.solver_threads),
       frameSpanUs: load(STATS.frame_span_us),
       appLate: load(STATS.app_late),
+      physicsStepUs: load(STATS.physics_step_us),
       latestStep: Atomics.load(this.#u32, Bridge.#word(this.#base + HEADER.latest_step)),
     };
+  }
+
+  // Tells the app and the renderer which breakdowns the stats panel is
+  // showing (DETAIL bits). They only measure the detail that is asked for.
+  setDetail(bits) {
+    Atomics.store(this.#u32, (this.#stats + STATS.detail) >>> 2, bits >>> 0);
+  }
+
+  // The timing table: every entry in use, as { slot, kind, name, totalNs,
+  // count }. `kind` is a TIMING value; `totalNs` and `count` are running
+  // totals that wrap at 2^32, and the mean per step or frame over a window is
+  // the change in one divided by the change in the other.
+  readTimings() {
+    const entries = [];
+    for (let slot = 0; slot < this.#timingCapacity; slot++) {
+      const entry = this.#timings + slot * this.#timingStride;
+      const kind = Atomics.load(this.#u32, (entry + TIMING_FIELD.kind) >>> 2);
+      if (kind === 0) continue;
+      entries.push({
+        slot,
+        kind,
+        name: (this.#timingNames[slot] ??= this.#timingName(entry)),
+        totalNs: Atomics.load(this.#u32, (entry + TIMING_FIELD.total_ns) >>> 2),
+        count: Atomics.load(this.#u32, (entry + TIMING_FIELD.count) >>> 2),
+      });
+    }
+    return entries;
+  }
+
+  // An entry's name: ASCII bytes up to the first zero. (Read byte by byte: a
+  // TextDecoder does not accept a view of shared memory.)
+  #timingName(entry) {
+    const bytes = new Uint8Array(this.#u32.buffer, entry + TIMING_FIELD.name, TIMING_FIELD.name_size);
+    let name = '';
+    for (const byte of bytes) {
+      if (byte === 0) break;
+      name += String.fromCharCode(byte);
+    }
+    return name;
   }
 }

@@ -43,6 +43,7 @@
 mod bridge;
 mod camera;
 mod page;
+mod profile;
 mod render;
 mod scene;
 mod slots;

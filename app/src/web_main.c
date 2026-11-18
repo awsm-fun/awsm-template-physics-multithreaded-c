@@ -148,6 +148,10 @@ void app_run(void) {
     for (;;) {
         tick = bridge_wait_frame(bridge, tick);
 
+        // Breakdowns only while the stats panel shows them.
+        uint32_t detail = bridge_detail(bridge);
+        app.profile = (detail & BRIDGE_DETAIL_APP) != 0;
+        app.profile_physics = (detail & BRIDGE_DETAIL_PHYSICS) != 0;
         double start_ms = emscripten_get_now();
         clock_read(&clock, bridge);
         app_frame_input(&app, (uint32_t)clock.now_us, clock.period_ms);
@@ -156,6 +160,10 @@ void app_run(void) {
             double work_us = (emscripten_get_now() - start_ms) * 1000.0;
             atomic_fetch_add_explicit(&stats->step_work_us, (uint32_t)(work_us + 0.5),
                                       memory_order_relaxed);
+            atomic_fetch_add_explicit(&stats->physics_step_us,
+                                      (uint32_t)(app.physics_ms * 1000.0 + 0.5),
+                                      memory_order_relaxed);
+            app.physics_ms = 0.0;
         }
     }
 }

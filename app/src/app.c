@@ -856,6 +856,84 @@ static void send_roll_cue(app_state *app) {
     send_cue(app, APP_CUE_ROLL, speed, ball->position);
 }
 
+// ── Timing (for the stats panel) ─────────────────────────────────────────
+//
+// The panel shows the step in two parts: the app's own code, and Box3D's
+// step, which runs on all the solver threads. Each has a breakdown, measured
+// only while the panel has it open (app->profile, app->profile_physics).
+// These are their entries in the bridge's timing table.
+enum {
+    // The app's own code, in the order it runs.
+    PHASE_SCENE,
+    PHASE_INPUT,
+    PHASE_LOGIC,
+    PHASE_RESULTS,
+    PHASE_PUBLISH,
+    // The stages of b3World_Step, and the parts of its solve stage, as
+    // Box3D reports them (b3Profile).
+    STAGE_PAIRS,
+    STAGE_COLLIDE,
+    STAGE_SOLVE,
+    STAGE_SENSORS,
+    SOLVE_SETUP,
+    SOLVE_CONSTRAINTS,
+    SOLVE_TRANSFORMS,
+    SOLVE_REFIT,
+    SOLVE_BULLETS,
+    SOLVE_SLEEP,
+    TIMING_ENTRIES,
+};
+static_assert(TIMING_ENTRIES <= BRIDGE_TIMING_APP_SLOTS, "more entries than the app's slots");
+
+static void name_timings(bridge_header *bridge) {
+    bridge_timing_name(bridge, PHASE_SCENE, BRIDGE_TIMING_APP_PHASE, "read scene");
+    bridge_timing_name(bridge, PHASE_INPUT, BRIDGE_TIMING_APP_PHASE, "read input");
+    bridge_timing_name(bridge, PHASE_LOGIC, BRIDGE_TIMING_APP_PHASE, "game logic");
+    bridge_timing_name(bridge, PHASE_RESULTS, BRIDGE_TIMING_APP_PHASE, "poses + contact events");
+    bridge_timing_name(bridge, PHASE_PUBLISH, BRIDGE_TIMING_APP_PHASE, "publish");
+    bridge_timing_name(bridge, STAGE_PAIRS, BRIDGE_TIMING_PHYSICS_STAGE, "find pairs");
+    bridge_timing_name(bridge, STAGE_COLLIDE, BRIDGE_TIMING_PHYSICS_STAGE, "collide");
+    bridge_timing_name(bridge, STAGE_SOLVE, BRIDGE_TIMING_PHYSICS_STAGE, "solve");
+    bridge_timing_name(bridge, STAGE_SENSORS, BRIDGE_TIMING_PHYSICS_STAGE, "sensors");
+    bridge_timing_name(bridge, SOLVE_SETUP, BRIDGE_TIMING_PHYSICS_SOLVE, "set up");
+    bridge_timing_name(bridge, SOLVE_CONSTRAINTS, BRIDGE_TIMING_PHYSICS_SOLVE, "constraints");
+    bridge_timing_name(bridge, SOLVE_TRANSFORMS, BRIDGE_TIMING_PHYSICS_SOLVE, "update bodies");
+    bridge_timing_name(bridge, SOLVE_REFIT, BRIDGE_TIMING_PHYSICS_SOLVE, "refit the tree");
+    bridge_timing_name(bridge, SOLVE_BULLETS, BRIDGE_TIMING_PHYSICS_SOLVE, "fast bodies");
+    bridge_timing_name(bridge, SOLVE_SLEEP, BRIDGE_TIMING_PHYSICS_SOLVE, "sleep");
+}
+
+// While profiling: charges the time since the last lap to `phase` and starts
+// the next one. (Box3D's clock, since it is there on every platform.)
+static void lap(app_state *app, uint32_t phase) {
+    if (app->profile) {
+        bridge_timing_add(app->bridge, phase, (double)b3GetMillisecondsAndReset(&app->lap_ticks));
+    }
+}
+
+// Steps the world, timing it for the panel's physics headline, and passes on
+// Box3D's own account of the step when the panel asks for it.
+static void step_world(app_state *app, float dt) {
+    uint64_t start = b3GetTicks();
+    b3World_Step(app->world, dt, SOLVER_SUB_STEPS);
+    app->physics_ms += (double)b3GetMilliseconds(start);
+
+    if (app->profile_physics) {
+        b3Profile profile = b3World_GetProfile(app->world);
+        bridge_header *bridge = app->bridge;
+        bridge_timing_add(bridge, STAGE_PAIRS, (double)profile.pairs);
+        bridge_timing_add(bridge, STAGE_COLLIDE, (double)profile.collide);
+        bridge_timing_add(bridge, STAGE_SOLVE, (double)profile.solve);
+        bridge_timing_add(bridge, STAGE_SENSORS, (double)profile.sensors);
+        bridge_timing_add(bridge, SOLVE_SETUP, (double)profile.solverSetup);
+        bridge_timing_add(bridge, SOLVE_CONSTRAINTS, (double)profile.constraints);
+        bridge_timing_add(bridge, SOLVE_TRANSFORMS, (double)profile.transforms);
+        bridge_timing_add(bridge, SOLVE_REFIT, (double)profile.refit);
+        bridge_timing_add(bridge, SOLVE_BULLETS, (double)profile.bullets);
+        bridge_timing_add(bridge, SOLVE_SLEEP, (double)profile.sleepIslands);
+    }
+}
+
 // ── The step ─────────────────────────────────────────────────────────────
 
 static void simulate(app_state *app, float dt) {
@@ -863,8 +941,10 @@ static void simulate(app_state *app, float dt) {
     // Everything the world needs is in `app`; read input with app_key_held()
     // or in apply_input(), talk back with send_command() / send_cue().
     steer_player(app, dt);
+    lap(app, PHASE_LOGIC);
 
-    b3World_Step(app->world, dt, SOLVER_SUB_STEPS);
+    step_world(app, dt);
+    app->lap_ticks = b3GetTicks(); // the step is the physics' time, not a phase of ours
 
     // Copy the new poses out, and rescue any ball that got over a rail and
     // fell off the table.
@@ -941,6 +1021,7 @@ void app_init(app_state *app, bridge_header *bridge, uint32_t solver_threads) {
     // input queue alone is 32 KB) and a literal would be built on the stack.
     memset(app, 0, sizeof *app);
     app->bridge = bridge;
+    name_timings(bridge);
     app->camera = camera_default(vec3_make(0.0f, CAMERA_TARGET_LIFT, 0.0f));
     // One world for the app's whole life. A new scene description replaces
     // its bodies, not the world, which also keeps the solver threads (owned
@@ -961,19 +1042,26 @@ void app_destroy(app_state *app) {
 
 void app_step(app_state *app, float dt) {
     app->step += 1;
+    if (app->profile) {
+        app->lap_ticks = b3GetTicks();
+    }
 
     read_scene(app);
+    lap(app, PHASE_SCENE);
     read_user_input(app);
+    lap(app, PHASE_INPUT);
     // Before the scene is known there is nothing to simulate, but the
     // snapshot still goes out: it carries the camera the renderer draws with.
     if (app->scene.ready) {
         simulate(app, dt);
     }
+    lap(app, PHASE_RESULTS);
     send_camera_cue_if_turned(app);
     publish_snapshot(app);
     // A tap counts for one step only.
     app->keys_tapped[0] = 0;
     app->keys_tapped[1] = 0;
+    lap(app, PHASE_PUBLISH);
 }
 
 int app_active_balls(const app_state *app) {

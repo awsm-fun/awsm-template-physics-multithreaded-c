@@ -447,6 +447,11 @@ function main() {
     if (event.ctrlKey || event.metaKey || event.altKey) return; // leave shortcuts alone
     const key = KEY_CODES[event.code];
     if (key === undefined) return;
+    // A button reached with the keyboard keeps the keys that press it. (One
+    // that was clicked does not: `:focus-visible` is the browser's own test
+    // for "focused from the keyboard", so the mouse never takes these keys
+    // away from the game.)
+    if (pressesFocusedControl(event)) return;
     event.preventDefault(); // no page scrolling on Space / arrows
     // A held key repeats its keydown; only the first one is news. While no
     // app is listening nothing is remembered, so a key held through loading
@@ -577,6 +582,7 @@ function main() {
   // ── Per frame: the frame mark, then cues ──
 
   function frame(timestamp) {
+    const start = performance.now();
     const bridge = app?.bridge;
     if (bridge) {
       // Close this frame's input (if it had any). The browser delivers a
@@ -606,6 +612,8 @@ function main() {
         soundCue(cue, value, x, z);
       });
     }
+    // For the stats panel: what this thread spends per frame.
+    stats.pageFrame(performance.now() - start);
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
@@ -621,6 +629,17 @@ function main() {
   spawnApp();
   loadAudio(baseUrl); // in parallel with the workers; never throws
   setStatus('loading scene…');
+}
+
+// Enter or Space on a control that has the keyboard's focus: the browser's
+// to handle (it presses the control), not the game's.
+function pressesFocusedControl(event) {
+  const pressing = event.code === 'Enter' || event.code === 'NumpadEnter' || event.code === 'Space';
+  return (
+    pressing &&
+    event.target instanceof Element &&
+    event.target.matches('button:focus-visible, select:focus-visible, a[href]:focus-visible')
+  );
 }
 
 // The latest impact cue, for the stats panel: { name, intensity }.
