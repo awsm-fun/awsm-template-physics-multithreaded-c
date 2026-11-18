@@ -23,6 +23,19 @@
 // a faster game: every rate in app.c is per second.
 enum { APP_STEP_HZ = 240 };
 
+// What happens to the scene when you save a C file and `task dev` swaps a new
+// build of the app into the running page:
+//
+//   1  the new app asks the renderer to load the scene again
+//      (app_reload_scene), so every save starts from the scene bundle,
+//      whatever the previous build did to the world. Costs a scene load
+//      (textures included) per save.
+//   0  the new app takes over the scene as the renderer has it. Instant, and
+//      fine for this demo: the renderer undoes every bind and spawn of the
+//      previous app when a new one attaches. Anything a future command might
+//      change beyond that would still be there.
+#define APP_RELOAD_SCENE_ON_HOT_SWAP 1
+
 // Ids carried in BRIDGE_CUE records (u[0]). The page turns them into sound;
 // dom/main.js has a matching table.
 //
@@ -171,6 +184,9 @@ typedef struct app_state {
     // Scene records collected between SCENE_BEGIN and SCENE_READY.
     bridge_record colliders[APP_MAX_SCENE_COLLIDERS];
     int collider_count;
+    // app_reload_scene() was called: what the renderer still says about the
+    // old scene is ignored until the description of the fresh one begins.
+    bool reload_pending;
 } app_state;
 
 // Sets up `app` to talk through `bridge` (which must outlive it) and creates
@@ -196,6 +212,14 @@ void app_frame_input(app_state *app, uint32_t frame_time_us, double period_ms);
 
 // Whether key `key` (BRIDGE_KEY_*) counts as held in the current step.
 bool app_key_held(const app_state *app, uint32_t key);
+
+// Asks the renderer to destroy everything in the scene and load it again from
+// the bundle, without touching the GPU device or reloading the page
+// (BRIDGE_CMD_RELOAD_SCENE). The world is emptied at once and nothing is
+// simulated until the renderer has described the fresh scene; the app then
+// starts over exactly as after the first load. Call it from anywhere in the
+// app: a "restart" key (R in the demo), a game-over screen, the next level.
+void app_reload_scene(app_state *app);
 
 // Number of balls currently in play (including the player's).
 int app_active_balls(const app_state *app);

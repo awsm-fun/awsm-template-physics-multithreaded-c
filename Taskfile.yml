@@ -9,7 +9,8 @@
 #   taskfile/dev.yml       dev:*       dev server + file watchers
 #
 # Everything is built into dist/, which is exactly what gets deployed. Each
-# build task writes its dist/<name>.stamp last; the dev server watches those.
+# build task writes its dist/<name>.stamp LAST; the dev server watches those
+# stamps to know when to swap the app or reload the page.
 #
 # Run `task` to list the tasks. Variables can be set on the command line,
 # e.g. `task dev PORT=9000 OPEN=` or `task build COI=0`.
@@ -72,7 +73,9 @@ tasks:
         need node         "brew install node         (18 or newer)"
         need watchexec    "brew install watchexec"
         need cargo        "install Rust: https://rustup.rs"
-        need wasm-bindgen "cargo install wasm-bindgen-cli --locked --version <the wasm-bindgen pin in renderer/Cargo.toml>"
+        # The CLI must be exactly the version of the crate pinned in Cargo.toml.
+        bindgen_pin=$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' renderer/Cargo.toml)
+        need wasm-bindgen "cargo install wasm-bindgen-cli --locked --version $bindgen_pin"
         need wasm-opt     "brew install binaryen"
         want clang-format "brew install clang-format  (for task fmt)"
         if command -v rustup >/dev/null 2>&1; then
@@ -103,18 +106,17 @@ tasks:
         vars: { COI: '{{if eq .COI "0"}}0{{else}}1{{end}}' }
 
   dev:
-    desc: 'Build, serve at http://127.0.0.1:{{.PORT}} and rebuild on change (app/ hot-swaps, dom/ reloads; RELOAD=page for full reloads)'
+    desc: 'Build, serve at http://127.0.0.1:{{.PORT}}, and on every save rebuild just the part that changed (app/ hot-swaps; the rest reloads the page)'
     preconditions:
       - sh: command -v watchexec
         msg: 'watchexec not found. Install it with: brew install watchexec'
       - sh: command -v node
         msg: 'node not found. Install it with: brew install node'
     cmds:
-      # The Rust modules are not watched: build each only if dist/ has none
-      # yet. After changing renderer/ or audio/, run `task renderer:release`
-      # or `task audio:release` (the page reloads).
-      - task: renderer-if-missing
-      - task: audio-if-missing
+      # Dev builds of everything. Each of these is incremental, so when
+      # nothing changed since the last run this takes a few seconds.
+      - task: renderer:dev
+      - task: audio:dev
       - task: media:build
       - task: dom:build
       - task: app:dev
@@ -124,20 +126,6 @@ tasks:
       - task: app:configure
         vars: { PRESET: debug }
       - task: dev:watch
-
-  renderer-if-missing:
-    internal: true
-    status:
-      - test -f dist/renderer.stamp
-    cmds:
-      - task: renderer:release
-
-  audio-if-missing:
-    internal: true
-    status:
-      - test -f dist/audio.stamp
-    cmds:
-      - task: audio:release
 
   serve:
     desc: 'Release build, then serve it at http://127.0.0.1:{{.PORT}} (no watching)'

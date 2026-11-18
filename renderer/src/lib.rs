@@ -22,7 +22,7 @@
 //! # Map
 //!
 //! * [`bridge`] — the wire format; the only module that knows the layout.
-//! * [`render`] — start-up, the frame loop, attach / detach.
+//! * [`render`] — start-up, the frame loop, attach / detach, scene reload.
 //! * [`scene`] — loading the scene, its colliders and its addressable nodes.
 //! * [`slots`] — what each pose slot drives (bind / spawn / despawn).
 //! * [`camera`] — the app's camera, as the renderer wants it.

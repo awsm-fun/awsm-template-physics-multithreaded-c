@@ -1,32 +1,37 @@
 # The render worker: builds the Rust crate in renderer/ into dist/renderer/.
 #
-# Included from the root Taskfile under the `renderer:` namespace, so the tasks
-# are `task renderer:release`, `renderer:debug`, `renderer:check`,
-# `renderer:fmt` and `renderer:clean`.
-#
 # A build is a short pipeline:
 #
 #   cargo build     Rust  →  renderer/target/wasm32-unknown-unknown/<profile>/renderer.wasm
 #   wasm-bindgen    that  →  dist/renderer/renderer_bg.wasm + renderer.js (its JS glue)
 #   wasm-opt        shrinks renderer_bg.wasm in place (release only)
 #   copy            renderer/web/worker.js  →  dist/renderer/worker.js
-#   stamp           touch dist/renderer.stamp, which tells the dev server to reload
+#   stamp           dist/renderer.stamp, which tells the dev server to reload
+#
+# Two profiles (see renderer/Cargo.toml):
+#
+#   dev       this crate unoptimized, its dependencies optimized, no wasm-opt.
+#             Rebuilds after an edit in seconds. `task dev` uses it.
+#   release   everything optimized for size, LTO, wasm-opt. Minutes; `task
+#             build` uses it.
+#
+# The first build of either compiles awsm-renderer and its dependencies, which
+# takes several minutes. Cargo caches that in renderer/target/.
 version: "3"
 
 vars:
   RENDERER_SRC: "{{.ROOT_DIR}}/renderer"
   RENDERER_OUT: "{{.ROOT_DIR}}/dist/renderer"
   RENDERER_STAMP: "{{.ROOT_DIR}}/dist/renderer.stamp"
+  RENDERER_TARGET: "{{.ROOT_DIR}}/renderer/target/wasm32-unknown-unknown"
 
   # wasm-opt has to be told which post-MVP wasm features the module uses, or it
   # rejects the first instruction it does not expect. This is exactly the set
   # stable rustc turns on by default for wasm32-unknown-unknown (check with
-  # `rustc --print cfg --target wasm32-unknown-unknown`): bulk-memory,
-  # multivalue, mutable-globals, nontrapping-fptoint, reference-types and
-  # sign-ext, plus the two sub-features LLVM implies with them. Every browser
-  # that has WebGPU has all of these. `--all-features` is deliberately not
-  # used: it would also let wasm-opt emit things (threads, GC, …) that no flag
-  # here asked for.
+  # `rustc --print cfg --target wasm32-unknown-unknown`), plus the two
+  # sub-features LLVM implies with them. Every browser that has WebGPU has all
+  # of these. `--all-features` is deliberately not used: it would also let
+  # wasm-opt emit things (threads, GC, …) that no flag here asked for.
   RENDERER_WASM_FEATURES: >-
     --enable-bulk-memory
     --enable-bulk-memory-opt
@@ -38,8 +43,17 @@ vars:
     --enable-sign-ext
 
 tasks:
+  dev:
+    desc: "Renderer: incremental dev build into dist/renderer, then dist/renderer.stamp"
+    cmds:
+      - task: cargo
+        vars: { ARGS: "build" }
+      - task: bindgen-dev
+      - task: finish
+        vars: { PROFILE: dev }
+
   release:
-    desc: "Renderer: optimized build into dist/renderer"
+    desc: "Renderer: optimized build into dist/renderer, then dist/renderer.stamp"
     preconditions:
       - sh: command -v wasm-opt >/dev/null
         msg: "wasm-opt not found. It is part of Binaryen: `brew install binaryen` (macOS) or `apt install binaryen` (Linux)."
@@ -55,15 +69,7 @@ tasks:
         "{{.RENDERER_OUT}}/renderer_bg.wasm"
         -o "{{.RENDERER_OUT}}/renderer_bg.wasm"
       - task: finish
-
-  debug:
-    desc: "Renderer: fast build into dist/renderer (own code unoptimized, dependencies optimized, no wasm-opt)"
-    cmds:
-      - task: cargo
-        vars: { ARGS: "build" }
-      - task: bindgen
-        vars: { PROFILE: debug }
-      - task: finish
+        vars: { PROFILE: release }
 
   check:
     desc: "Renderer: cargo check, clippy with warnings as errors, and a formatting check"
@@ -153,25 +159,47 @@ tasks:
     internal: true
     requires:
       vars: [PROFILE]
+    vars:
+      BINDGEN_PIN:
+        sh: sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' "{{.RENDERER_SRC}}/Cargo.toml"
     preconditions:
       - sh: command -v wasm-bindgen >/dev/null
         msg: |
           wasm-bindgen not found. Install the CLI at exactly the version of the
-          `wasm-bindgen` crate pinned in renderer/Cargo.toml, for example:
-              cargo install wasm-bindgen-cli --locked --version 0.2.126
+          `wasm-bindgen` crate pinned in renderer/Cargo.toml:
+              cargo install wasm-bindgen-cli --locked --version {{.BINDGEN_PIN}}
     cmds:
+      # From here until `finish`, dist/renderer is half-written: without a
+      # stamp, nothing can mistake it for a finished build.
+      - rm -f "{{.RENDERER_STAMP}}"
       - mkdir -p "{{.RENDERER_OUT}}"
       - >-
         wasm-bindgen --target web --no-typescript
         --out-name renderer
         --out-dir "{{.RENDERER_OUT}}"
-        "{{.RENDERER_SRC}}/target/wasm32-unknown-unknown/{{.PROFILE}}/renderer.wasm"
+        "{{.RENDERER_TARGET}}/{{.PROFILE}}/renderer.wasm"
 
-  # Adds the worker's entry script, then touches the stamp. The stamp comes
-  # last on purpose: the dev server watches it, and must only reload the page
-  # once every file of the build is in place.
+  # The dev build's wasm-bindgen step, skipped when dist/ already holds the
+  # output of this very dev build (so starting `task dev` with nothing changed
+  # costs a cargo no-op and nothing else). The stamp records which profile
+  # filled dist/renderer, so a release build left there is never mistaken for
+  # an up-to-date dev one.
+  bindgen-dev:
+    internal: true
+    status:
+      - grep -q '^dev ' "{{.RENDERER_STAMP}}"
+      - test "{{.RENDERER_OUT}}/renderer_bg.wasm" -nt "{{.RENDERER_TARGET}}/debug/renderer.wasm"
+    cmds:
+      - task: bindgen
+        vars: { PROFILE: debug }
+
+  # Adds the worker's entry script, then writes the stamp ("<profile> <when>").
+  # The stamp comes last on purpose: the dev server watches it, and must only
+  # reload the page once every file of the build is in place.
   finish:
     internal: true
+    requires:
+      vars: [PROFILE]
     cmds:
       - cp "{{.RENDERER_SRC}}/web/worker.js" "{{.RENDERER_OUT}}/worker.js"
-      - date > "{{.RENDERER_STAMP}}"
+      - echo "{{.PROFILE}} $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "{{.RENDERER_STAMP}}"

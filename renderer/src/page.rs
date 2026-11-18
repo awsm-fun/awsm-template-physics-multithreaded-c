@@ -28,15 +28,17 @@ pub fn post_gpu_info(is_fallback: bool, max_texture_dim: u32) {
     );
 }
 
-/// `{type: 'ready'}`: the scene is on screen.
+/// `{type: 'ready'}`: the scene is on screen (after start-up, and again after
+/// every scene reload).
 pub fn post_ready() {
     post("ready", &[]);
 }
 
-/// `{type: 'attached'}`: an attach completed and the scene description has
-/// been handed to the app.
-pub fn post_attached() {
-    post("attached", &[]);
+/// `{type: 'loading'}`: the scene is about to be loaded again (the app asked
+/// for a reload). The page shows its loading screen again, appends the
+/// `progress` lines that follow, and hides it on the next `ready`.
+pub fn post_loading() {
+    post("loading", &[]);
 }
 
 /// `{type: 'aa-compile-start', msaa, smaa}`: an anti-aliasing change from the

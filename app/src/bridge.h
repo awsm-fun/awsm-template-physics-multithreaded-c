@@ -13,7 +13,10 @@
 //
 // This header is the single source of truth for the layout. The mirrors are
 // `renderer/src/bridge.rs` and `dom/bridge.js`; nothing else in any of the
-// three codebases should know these offsets.
+// three codebases should know these offsets. `task test` compares both
+// mirrors with this header (app/tests/bridge_layout.c prints the layout as
+// the compiler sees it, tools/check-bridge.mjs compares), so they cannot
+// drift without a test failing.
 //
 // ── What is in the block ───────────────────────────────────────────────────
 //
@@ -383,9 +386,14 @@ enum {
     BRIDGE_EV_FRAME_MARK = 6,
 
     // ── renderer → app ─────────────────────────────────────────────────────
-    // Sent once per attach, after the scene is on screen. A BEGIN, then one
+    // Sent once per attach, after the scene is on screen, and again after
+    // every scene reload (BRIDGE_CMD_RELOAD_SCENE). A BEGIN, then one
     // COLLIDER per collider node, then READY. Nothing should be simulated
     // before READY arrives.
+    //   u[0]  0: the scene is exactly as loaded; no app has changed it.
+    //         1: a previous app instance has driven this scene (the app was
+    //            hot-swapped). The renderer has undone every bind and spawn,
+    //            but the scene has been played with.
     BRIDGE_SCENE_BEGIN = 16,
     // One collider node, in WORLD space (node scale already folded into the
     // shape dimensions).
@@ -414,6 +422,14 @@ enum {
     // Remove whatever SPAWN created for this slot (or release a BIND).
     //   u[0]  pose slot
     BRIDGE_CMD_DESPAWN = 34,
+    // Throw the whole scene away and load it again from the bundle. The GPU
+    // device, the canvas, the page and its Settings (resolution,
+    // anti-aliasing) stay; every object, bind and spawn goes. The page shows
+    // its loading screen meanwhile, and then the renderer describes the fresh
+    // scene (BEGIN with u[0] = 0, COLLIDER…, READY) exactly as after the
+    // first load. Commands sent after this one apply to the new scene.
+    // No payload.
+    BRIDGE_CMD_RELOAD_SCENE = 35,
 
     // ── app → dom ──────────────────────────────────────────────────────────
     // Something happened that the page may want to voice or show.
@@ -455,7 +471,8 @@ static inline uint32_t bridge_hash(const char *name) {
 // ── Layout guards ──────────────────────────────────────────────────────────
 // If one of these fires, a field was moved or resized. Either undo it, or
 // (for a deliberate change of meaning) bump BRIDGE_VERSION and update
-// renderer/src/bridge.rs and dom/bridge.js to match.
+// renderer/src/bridge.rs and dom/bridge.js to match. (These guard this header
+// against itself; `task test` checks the two mirrors against it.)
 
 static_assert(sizeof(_Atomic uint32_t) == 4, "atomics must be plain 32-bit words");
 

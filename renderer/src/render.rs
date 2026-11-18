@@ -1,22 +1,21 @@
 //! The render worker's life: start the renderer, load the scene, then draw a
 //! frame per display refresh from whatever the app has published.
 //!
-//! Everything here runs on one thread, in three kinds of entry:
+//! Everything here runs on one thread, entered in four ways:
 //!
 //! * a message from the page ([`init`], [`resize`], [`anti_alias`],
 //!   [`attach`], [`detach`]);
 //! * the asynchronous start-up that `init` kicks off ([`App::boot`]);
 //! * the `requestAnimationFrame` callback ([`on_frame`]), once start-up is
 //!   done;
-//! * an anti-aliasing change being applied ([`apply_anti_aliasing`]), which
-//!   is asynchronous too.
+//! * a [`Job`]: an anti-aliasing change or a scene reload being carried out,
+//!   which is asynchronous too ([`run_job`]).
 //!
 //! The `AwsmRenderer` itself is only ever touched from the frame callback (and
-//! from start-up, before the first frame, and while an anti-aliasing change
-//! has it away from the frame loop). A message from the page changes what
-//! surrounds it — the canvas size, which app is attached, the anti-aliasing
-//! wanted — and anything that needs the renderer, such as an `attach`, waits
-//! for the next frame.
+//! from start-up, before the first frame, and while a job has it away from
+//! the frame loop). A message from the page changes what surrounds it — the
+//! canvas size, which app is attached, the anti-aliasing wanted — and anything
+//! that needs the renderer, such as an `attach`, waits for the next frame.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -85,14 +84,24 @@ struct State {
     pending_attach: Option<AttachRequest>,
     /// The latest anti-aliasing change that has not been applied yet.
     pending_anti_alias: Option<AntiAliasMode>,
-    /// Set while an anti-aliasing change is being applied. `app` is `None`
-    /// for that time: the change owns the renderer across its awaits.
-    reconfiguring: bool,
-    /// A `detach` that arrived while `reconfiguring`, to be acted on when the
-    /// renderer comes back.
-    detach_while_reconfiguring: bool,
-    /// `None` until start-up has finished, and while `reconfiguring`.
+    /// Set while a [`Job`] is running. `app` is `None` for that time: the job
+    /// owns the renderer across its awaits.
+    busy: bool,
+    /// A `detach` that arrived while `busy`, to be acted on when the renderer
+    /// comes back.
+    detach_while_busy: bool,
+    /// `None` until start-up has finished, and while `busy`.
     app: Option<App>,
+}
+
+/// Work that needs the renderer across awaits, so it cannot run inside a
+/// frame. While one runs no frame is drawn, and the app, which is woken by
+/// drawn frames, waits too.
+enum Job {
+    /// The page's Settings changed the anti-aliasing: recompile pipelines.
+    AntiAlias(AntiAliasMode),
+    /// The app asked for the whole scene to be loaded again.
+    ReloadScene,
 }
 
 struct AttachRequest {
@@ -144,7 +153,7 @@ pub fn init(
         format!("{base_url}/")
     };
     wasm_bindgen_futures::spawn_local(async move {
-        match App::boot(canvas, &base_url, anti_alias).await {
+        match App::boot(canvas, base_url, anti_alias).await {
             Ok(app) => {
                 STATE.with(|state| state.borrow_mut().app = Some(app));
                 request_frame();
@@ -206,8 +215,8 @@ pub fn detach() {
         state.pending_attach = None;
         if let Some(app) = state.app.as_mut() {
             app.detach();
-        } else if state.reconfiguring {
-            state.detach_while_reconfiguring = true;
+        } else if state.busy {
+            state.detach_while_busy = true;
         }
     });
 }
@@ -225,75 +234,50 @@ fn request_frame() {
 /// The `requestAnimationFrame` callback. `frame_ms` is the browser's timestamp
 /// for the frame being prepared.
 fn on_frame(frame_ms: f64) {
-    STATE.with(|state| {
+    let job = STATE.with(|state| {
         let mut state = state.borrow_mut();
-        // An anti-aliasing change recompiles pipelines, which takes awaits.
-        // The renderer is handed to it for that time, so no frame is drawn
-        // (and the app, which is woken by drawn frames, waits too).
-        if let Some(mode) = state.pending_anti_alias {
-            if let Some(app) = state.app.take() {
-                state.pending_anti_alias = None;
-                state.reconfiguring = true;
-                wasm_bindgen_futures::spawn_local(apply_anti_aliasing(app, mode));
-                return;
-            }
-        }
         let State {
             app,
             pending_attach,
+            pending_anti_alias,
+            busy,
             ..
         } = &mut *state;
-        if let Some(app) = app {
-            app.frame(frame_ms, pending_attach);
-        }
+        let running = app.as_mut()?;
+        // An anti-aliasing change is applied instead of drawing a frame; a
+        // scene reload is something the app asks for during one.
+        let job = match pending_anti_alias.take() {
+            Some(mode) => Job::AntiAlias(mode),
+            None => running.frame(frame_ms, pending_attach)?,
+        };
+        *busy = true;
+        app.take().map(|app| (app, job))
     });
+    // Started only now that STATE is released: the job borrows it again
+    // when it hands the `App` back.
+    if let Some((app, job)) = job {
+        wasm_bindgen_futures::spawn_local(run_job(app, job));
+    }
     request_frame();
 }
 
-/// Applies an anti-aliasing change to the running renderer, then hands it
-/// back to the frame loop. Only the first switch to a given mode really
-/// compiles anything; the renderer keeps the pipelines of modes it has used,
-/// so switching back is quick.
-async fn apply_anti_aliasing(mut app: App, mode: AntiAliasMode) {
-    page::post_aa_compile_start(mode.msaa, mode.smaa);
-    let applied = match app.renderer.set_anti_aliasing(mode.config()).await {
-        // Changing the configuration only marks what has to be rebuilt; the
-        // compiling happens in `commit_load`, whose progress the page shows.
-        Ok(()) => {
-            let mut last_line = String::new();
-            app.renderer
-                .commit_load(|stats| {
-                    let Some(line) = stats.phase_label() else {
-                        return;
-                    };
-                    if line != last_line {
-                        page::post_aa_compile_progress(&line);
-                        last_line = line;
-                    }
-                })
-                .await
-                .map(|_| ())
-                .map_err(|err| format!("anti-aliasing pipelines: {err}"))
-        }
-        Err(err) => Err(format!("anti-aliasing change: {err}")),
-    };
-    match applied {
-        Ok(()) => tracing::info!(
-            "anti-aliasing applied (msaa {}, smaa {})",
-            mode.msaa,
-            mode.smaa
-        ),
-        Err(message) => page::post_error(&message),
+/// Runs a [`Job`], then hands the `App` back to the frame loop, whether the
+/// job worked or not (a failure has posted an `error`), so the page is never
+/// left frozen. A `detach` that arrived meanwhile is acted on now; an
+/// `attach`, an anti-aliasing change or a `resize` needs nothing special: the
+/// first two wait in `State` for the next frame, and the canvas is resized
+/// directly.
+async fn run_job(mut app: App, job: Job) {
+    match job {
+        Job::AntiAlias(mode) => app.apply_anti_aliasing(mode).await,
+        Job::ReloadScene => app.reload_scene().await,
     }
-    // Always, even after a failure: the page lowers its overlay on this.
-    page::post_aa_compile_done();
-
     STATE.with(|state| {
         let mut state = state.borrow_mut();
-        if std::mem::take(&mut state.detach_while_reconfiguring) {
+        if std::mem::take(&mut state.detach_while_busy) {
             app.detach();
         }
-        state.reconfiguring = false;
+        state.busy = false;
         state.app = Some(app);
     });
 }
@@ -328,8 +312,15 @@ struct App {
     performance: web_sys::Performance,
     scene: SceneIndex,
     slots: Slots,
+    /// The absolute URL of the site root, ending in `/`: where the scene is
+    /// loaded from, again on a reload.
+    base_url: String,
     /// The app's bridge block. `None` while no app is attached.
     bridge: Option<Bridge>,
+    /// Whether an app has changed the scene since it was loaded: the `used`
+    /// flag of the next SCENE_BEGIN. Set by the first command an app sends,
+    /// cleared by a reload.
+    scene_used: bool,
     /// `performance.timeOrigin`: added to a frame's timestamp, it puts the
     /// frame on the frame clock the app and the page also use (bridge.h,
     /// "Frame pacing").
@@ -342,8 +333,6 @@ struct App {
     /// moved into the ring as it has room, so a scene with more colliders than
     /// the ring holds is still described completely.
     outbox: VecDeque<Record>,
-    /// Whether the page has been told about the current attach.
-    attach_reported: bool,
     /// The camera in use: the app's latest valid one, or the start-up view.
     camera: bridge::Camera,
     frames_drawn: u32,
@@ -364,7 +353,7 @@ impl App {
     /// Creates the renderer on `canvas` and loads the scene into it.
     async fn boot(
         canvas: OffscreenCanvas,
-        base_url: &str,
+        base_url: String,
         anti_alias: AntiAliasMode,
     ) -> Result<Self, String> {
         let gpu = web_global::navigator_gpu()
@@ -409,7 +398,7 @@ impl App {
             anti_alias.msaa, anti_alias.smaa
         ));
 
-        let scene = scene::load(&mut renderer, base_url).await?;
+        let scene = scene::load(&mut renderer, &base_url).await?;
         page::post_progress("starting render loop…");
 
         Ok(Self {
@@ -418,10 +407,11 @@ impl App {
             performance,
             scene,
             slots: Slots::new(),
+            base_url,
             bridge: None,
+            scene_used: false,
             published_frame_us: None,
             outbox: VecDeque::new(),
-            attach_reported: false,
             camera: camera::STARTUP,
             frames_drawn: 0,
             gpu_samples_published: None,
@@ -431,8 +421,9 @@ impl App {
         })
     }
 
-    /// One display frame.
-    fn frame(&mut self, frame_ms: f64, pending_attach: &mut Option<AttachRequest>) {
+    /// One display frame. Returns the job the app asked for during it, if
+    /// any: a scene reload.
+    fn frame(&mut self, frame_ms: f64, pending_attach: &mut Option<AttachRequest>) -> Option<Job> {
         let work_start = self.performance.now();
 
         // The app is told about the scene only once the scene is on screen.
@@ -450,6 +441,7 @@ impl App {
         // woken below, so its next burst cannot move it.
         let mut display_us = None;
         let mut late = false;
+        let mut job = None;
         if let Some(bridge) = self.bridge.as_ref() {
             let step_us = (1e6 / f64::from(bridge.step_hz())).round() as u32;
             display_us = self
@@ -470,10 +462,6 @@ impl App {
                 }
                 self.outbox.pop_front();
             }
-            if self.outbox.is_empty() && !self.attach_reported {
-                self.attach_reported = true;
-                page::post_attached();
-            }
 
             // Act on what the app asked for since the last frame.
             while let Some(record) = bridge.receive() {
@@ -482,7 +470,14 @@ impl App {
                 // command's step stamp is only meaningful next to a step
                 // count at least as recent as the command itself.
                 let at_step = slots::effect_step(record.step(), bridge.latest_step());
-                match record.command() {
+                let command = record.command();
+                if matches!(
+                    command,
+                    Command::Bind { .. } | Command::Spawn { .. } | Command::Despawn { .. }
+                ) {
+                    self.scene_used = true;
+                }
+                match command {
                     Command::Bind {
                         slot,
                         node,
@@ -510,6 +505,12 @@ impl App {
                     Command::Despawn { slot } => {
                         self.slots
                             .despawn(&mut self.renderer, &self.scene, slot, at_step)
+                    }
+                    Command::ReloadScene => {
+                        // Anything the app sent after this is meant for the
+                        // reloaded scene, so it stays in the ring until then.
+                        job = Some(Job::ReloadScene);
+                        break;
                     }
                     Command::Unknown { kind } => {
                         if !self.warned_unknown_record {
@@ -594,6 +595,7 @@ impl App {
             );
         }
         self.last_frame_ms = Some(frame_ms);
+        job
     }
 
     /// Connects to an app instance's bridge block, replacing any previous one.
@@ -619,15 +621,120 @@ impl App {
         // frame rather than waiting for the next sample.
         self.gpu_samples_published = None;
 
-        // Describe the scene to the app: BEGIN, every collider, READY.
-        self.outbox.push_back(Record::scene_begin());
+        self.describe_scene();
+        self.bridge = Some(bridge);
+    }
+
+    /// Queues the scene description for the app: BEGIN, every collider, READY.
+    fn describe_scene(&mut self) {
+        self.outbox.push_back(Record::scene_begin(self.scene_used));
         self.outbox
             .extend(self.scene.colliders.iter().map(Record::scene_collider));
         self.outbox
             .push_back(Record::scene_ready(self.scene.colliders.len() as u32));
-        self.attach_reported = false;
+    }
 
-        self.bridge = Some(bridge);
+    /// [`Job::AntiAlias`]: applies an anti-aliasing change. Only the first
+    /// switch to a given mode really compiles anything; the renderer keeps the
+    /// pipelines of modes it has used, so switching back is quick.
+    async fn apply_anti_aliasing(&mut self, mode: AntiAliasMode) {
+        page::post_aa_compile_start(mode.msaa, mode.smaa);
+        let applied = match self.renderer.set_anti_aliasing(mode.config()).await {
+            // Changing the configuration only marks what has to be rebuilt;
+            // the compiling happens in `commit_load`, whose progress the page
+            // shows.
+            Ok(()) => {
+                let mut last_line = String::new();
+                self.renderer
+                    .commit_load(|stats| {
+                        let Some(line) = stats.phase_label() else {
+                            return;
+                        };
+                        if line != last_line {
+                            page::post_aa_compile_progress(&line);
+                            last_line = line;
+                        }
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| format!("anti-aliasing pipelines: {err}"))
+            }
+            Err(err) => Err(format!("anti-aliasing change: {err}")),
+        };
+        match applied {
+            Ok(()) => tracing::info!(
+                "anti-aliasing applied (msaa {}, smaa {})",
+                mode.msaa,
+                mode.smaa
+            ),
+            Err(message) => page::post_error(&message),
+        }
+        // Always, even after a failure: the page lowers its overlay on this.
+        page::post_aa_compile_done();
+    }
+
+    /// [`Job::ReloadScene`]: throws the whole scene away and loads it again
+    /// from the bundle, on the same GPU device, then starts over exactly as
+    /// after the first load: the page shows its loading screen until `ready`,
+    /// and the app gets a fresh description (BEGIN with `used` false).
+    async fn reload_scene(&mut self) {
+        page::post_loading();
+        page::post_progress("reloading the scene…");
+        if let Err(message) = self.replace_scene().await {
+            page::post_error(&format!("reloading the scene failed: {message}"));
+        }
+
+        // Nothing measured or queued before the reload carries over.
+        self.outbox.clear();
+        // `ready` is posted again once the new scene is on screen.
+        self.frames_drawn = 0;
+        self.render_failing = false;
+        // The first frame after the pause draws the newest step rather than a
+        // moment from before it, and the pause is not reported as a frame.
+        self.published_frame_us = None;
+        self.last_frame_ms = None;
+        self.gpu_samples_published = None;
+        // Until the app publishes a camera again, the start-up view.
+        self.camera = camera::STARTUP;
+        self.scene_used = false;
+        if self.bridge.is_some() {
+            self.describe_scene();
+        }
+    }
+
+    /// The renderer half of [`App::reload_scene`]. On an error the renderer
+    /// holds either the old scene, as loaded (the wipe failed), or no scene
+    /// at all (loading failed); `scene` and `slots` match it either way.
+    async fn replace_scene(&mut self) -> Result<(), String> {
+        let capacity = self.bridge.as_ref().map_or(0, Bridge::pose_capacity);
+        // Undo every bind and spawn while the renderer they belong to still
+        // exists: if the wipe below fails, the old scene is what stays, and
+        // it has to be as loaded.
+        self.slots.reset(&mut self.renderer, &self.scene, capacity);
+
+        // `remove_all` rebuilds the renderer on the same device from the
+        // settings it was BUILT with (logging and GPU timing included). The
+        // anti-aliasing may have changed since, through the page's Settings,
+        // so the current mode is put back afterwards.
+        let anti_aliasing = self.renderer.anti_aliasing.clone();
+        self.renderer
+            .remove_all()
+            .await
+            .map_err(|err| format!("could not clear the renderer: {err}"))?;
+
+        // Everything derived from the old scene names renderer objects that
+        // no longer exist (transforms, meshes, materials). It is dropped,
+        // never released against the new renderer.
+        self.scene = SceneIndex::default();
+        self.slots = Slots::new();
+        self.slots.reset(&mut self.renderer, &self.scene, capacity);
+
+        // Before the load, so its pipeline compile includes this mode.
+        if let Err(err) = self.renderer.set_anti_aliasing(anti_aliasing).await {
+            page::post_error(&format!("restoring the anti-aliasing: {err}"));
+        }
+        self.scene = scene::load(&mut self.renderer, &self.base_url).await?;
+        Ok(())
     }
 
     /// Forgets the attached app. Everything it was driving stays where it is.

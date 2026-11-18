@@ -3,7 +3,8 @@
 // The loading screen is in the static HTML, so it shows the moment the page
 // arrives, while the wasm modules are still downloading. Progress lines from
 // this page and from the render worker are appended to it, and it fades out
-// once the first frames are on screen.
+// once the first frames are on screen. It comes back whenever the renderer
+// loads the scene again (the app asked for a reload).
 
 // The name the HUD and the "cannot start" screen go by.
 export const APP_NAME = 'physics-multithreaded-c';
@@ -14,13 +15,12 @@ const MAX_LOADING_LINES = 14;
 // Adds a line to the loading screen, and to the console. Every line is stamped
 // with the seconds since the page started loading: the gaps between stamps
 // show where a slow start spends its time, in a form a user can copy into a
-// report. Once the loading screen is gone, lines only go to the console.
+// report.
 export function loadingLog(message) {
   const seconds = (performance.now() / 1000).toFixed(2).padStart(6);
   const line = `[${seconds}s] ${message}`;
   console.log(`loading: ${line}`);
   const log = document.getElementById('loading-log');
-  if (!log) return;
   const row = document.createElement('div');
   row.textContent = line;
   log.append(row);
@@ -29,14 +29,16 @@ export function loadingLog(message) {
   }
 }
 
-// Fades the loading screen out, then removes it so it cannot catch clicks.
+// Shows the loading screen again, with an empty log: a new load is starting.
+export function loadingStart() {
+  document.getElementById('loading-log').replaceChildren();
+  document.getElementById('loading').classList.remove('done');
+}
+
+// Fades the loading screen out (style.css). It stays in the page, hidden,
+// for the next loadingStart().
 export function loadingDone() {
-  const loading = document.getElementById('loading');
-  if (!loading || loading.classList.contains('done')) return;
-  loading.classList.add('done'); // fades out (style.css)
-  const remove = () => loading.remove();
-  loading.addEventListener('transitionend', remove, { once: true });
-  setTimeout(remove, 1000); // in case no transition runs (e.g. reduced motion)
+  document.getElementById('loading').classList.add('done');
 }
 
 // The page cannot run at all (no cross-origin isolation, no WebGPU, …): show

@@ -1,9 +1,15 @@
-# Paths here are relative to this file (app/). Run `task setup` once so both
-# compile databases exist.
+# Editor support (clangd). Paths here are relative to this file (app/). Run
+# `task setup` once so both compile databases exist.
 #
 # Native files: use the debug build's compile flags.
+#
+# Everything under `Add` is a fallback for files opened BEFORE the project was
+# ever configured: they still parse as C23 (nullptr, bool, constexpr, …)
+# instead of lighting up with errors. Once a compile database exists these
+# flags just repeat what it says.
 CompileFlags:
   CompilationDatabase: build/debug
+  Add: [-std=gnu23]
 
 ---
 # Wasm-only files (named src/web_*) aren't in the native build, so use the
@@ -13,3 +19,18 @@ If:
   PathMatch: src/web_.*
 CompileFlags:
   CompilationDatabase: build/wasm-dev
+
+---
+# A lone .h has no compile command of its own, and clangd would otherwise have
+# to guess what language it is.
+If:
+  PathMatch: .*\.h
+CompileFlags:
+  Add: [-xc-header]
+
+---
+# The tests include the app's headers as "app.h", "bridge.h".
+If:
+  PathMatch: tests/.*
+CompileFlags:
+  Add: [-I../src]

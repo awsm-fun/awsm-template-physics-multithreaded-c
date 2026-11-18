@@ -14,6 +14,9 @@
 // SCENE_BEGIN, the table, its four rails and the ball as SCENE_COLLIDERs,
 // then SCENE_READY.
 void headless_send_scene(bridge_header *bridge);
+// The same, saying whether a previous app instance has driven the scene
+// (BRIDGE_SCENE_BEGIN, u[0]): what a hot-swapped app is told.
+void headless_send_scene_as(bridge_header *bridge, bool used);
 
 // Plays the page's part of user input.
 void headless_set_canvas(bridge_header *bridge, uint32_t width, uint32_t height);
@@ -33,6 +36,7 @@ typedef struct headless_outbox {
     uint32_t binds;
     uint32_t spawns;
     uint32_t despawns;
+    uint32_t reloads;
     uint32_t cues;                            // all BRIDGE_CUE records
     uint32_t cues_by_id[HEADLESS_CUE_KINDS];  // ... per cue id (u[0])
     float last_cue_value[HEADLESS_CUE_KINDS]; // f[1] of the latest cue with each id

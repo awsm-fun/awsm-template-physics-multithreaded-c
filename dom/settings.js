@@ -21,13 +21,16 @@ import { modal } from './modal.js';
 
 // ── Stored settings ────────────────────────────────────────────────────────
 
-const RES_STORAGE_KEY = 'awsm_res_scale';
-const AA_STORAGE_KEY = 'awsm_aa';
-// Older versions stored MSAA and SMAA as two separate on/off keys. A choice
-// made there is carried over to AA_STORAGE_KEY once, then they are removed.
-const LEGACY_AA_STORAGE_KEYS = ['awsm_msaa', 'awsm_smaa'];
+// Every key starts with this prefix. localStorage is shared by everything on
+// the same origin (every project under one domain, every app you run on
+// localhost:8000), so CHANGE IT when you start your own project from this
+// template, or two projects will overwrite each other's settings.
+const STORAGE_PREFIX = 'awsm_physics_mt_c_';
+
+const RES_STORAGE_KEY = `${STORAGE_PREFIX}res_scale`;
+const AA_STORAGE_KEY = `${STORAGE_PREFIX}aa`;
 // Whether the stats panel is open (stats.js).
-export const STATS_STORAGE_KEY = 'awsm_stats';
+export const STATS_STORAGE_KEY = `${STORAGE_PREFIX}stats`;
 
 // localStorage can be missing or throw (privacy modes, storage disabled). Then
 // nothing is remembered and the defaults apply on every load.
@@ -68,8 +71,7 @@ export function storeBool(key, value) {
 // must run before anything reads a stored setting.
 export function resetSettingsIfAsked() {
   if (!new URLSearchParams(window.location.search).has('reset')) return;
-  const keys = [RES_STORAGE_KEY, AA_STORAGE_KEY, ...LEGACY_AA_STORAGE_KEYS, STATS_STORAGE_KEY];
-  for (const key of keys) storageRemove(key);
+  for (const key of [RES_STORAGE_KEY, AA_STORAGE_KEY, STATS_STORAGE_KEY]) storageRemove(key);
   loadingLog('?reset — stored settings cleared, booting with defaults');
 }
 
@@ -143,22 +145,6 @@ function storedAa() {
   return Object.hasOwn(AA_MODES, value ?? '') ? value : null;
 }
 
-// Carries a choice stored by an older version over to AA_STORAGE_KEY, then
-// removes the old keys. Those were only ever written when the user flipped a
-// toggle, so they are real choices: MSAA on becomes MSAA; MSAA off becomes
-// SMAA if SMAA was on, else Off. Without them the current default applies.
-function migrateLegacyAa() {
-  const [msaa, smaa] = LEGACY_AA_STORAGE_KEYS.map(storageGet);
-  if (storageGet(AA_STORAGE_KEY) === null) {
-    let migrated = null;
-    if (msaa === '1') migrated = 'msaa';
-    else if (msaa === '0') migrated = smaa === '1' ? 'smaa' : 'off';
-    else if (msaa === null && smaa === '1') migrated = 'msaa';
-    if (migrated) storageSet(AA_STORAGE_KEY, migrated);
-  }
-  for (const key of LEGACY_AA_STORAGE_KEYS) storageRemove(key);
-}
-
 // ── The settings ───────────────────────────────────────────────────────────
 
 export class Settings {
@@ -199,7 +185,6 @@ export class Settings {
     this.#userScale = stored !== null;
     this.#scale = stored ?? this.#autoScale();
 
-    migrateLegacyAa();
     this.#aa = storedAa() ?? (coarse ? 'off' : AA_DEFAULT);
     // If a touch-device default is in effect (no stored choice replaced it),
     // quality was visibly traded for frame rate: say so once the game is on
@@ -273,9 +258,11 @@ export class Settings {
     this.#onResize(this.backing());
   }
 
-  // The first frames are on screen.
+  // The first frames are on screen. (Called again after every scene reload;
+  // the notice is shown once.)
   ready() {
     if (this.#showQualityNotice) this.#qualityNotice.open();
+    this.#showQualityNotice = false;
   }
 
   // The renderer's `aa-compile-*` messages, around an anti-aliasing change.
@@ -312,14 +299,21 @@ export class Settings {
   // moved to another display).
   #canvasResized(entry) {
     this.#dpr = Math.max(window.devicePixelRatio || 1, 1);
+    this.#nativeWidth = Math.max(entry.contentRect.width, 1) * this.#dpr;
+    this.#nativeHeight = Math.max(entry.contentRect.height, 1) * this.#dpr;
+    // Where the browser reports the exact size in device pixels, use that:
+    // CSS size × ratio can be a pixel off at a fractional ratio. But only if
+    // the two agree to within rounding. If they do not, the box is not in
+    // device pixels (Chrome's DevTools device emulation reports CSS pixels
+    // there), and the product above is the one to believe.
     const box = entry.devicePixelContentBoxSize?.[0];
-    if (box && window.devicePixelRatio >= 1) {
-      // Exact device pixels, where the browser reports them.
+    if (
+      box &&
+      Math.abs(box.inlineSize - this.#nativeWidth) < 2 &&
+      Math.abs(box.blockSize - this.#nativeHeight) < 2
+    ) {
       this.#nativeWidth = Math.max(box.inlineSize, 1);
       this.#nativeHeight = Math.max(box.blockSize, 1);
-    } else {
-      this.#nativeWidth = Math.max(entry.contentRect.width, 1) * this.#dpr;
-      this.#nativeHeight = Math.max(entry.contentRect.height, 1) * this.#dpr;
     }
     // The default depends on the size (the pixel budget), so it is worked
     // out again; a scale the user chose stays.

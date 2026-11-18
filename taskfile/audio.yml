@@ -1,16 +1,17 @@
 # The page's sound: builds the Rust crate in audio/ into dist/audio/.
 #
-# Included from the root Taskfile under the `audio:` namespace, so the tasks
-# are `task audio:release`, `audio:check`, `audio:fmt` and `audio:clean`.
-#
 # The same pipeline as the renderer's (taskfile/renderer.yml), minus the
 # worker script: this module runs on the page itself, which imports
 # dist/audio/audio.js directly.
 #
-#   cargo build     Rust  →  audio/target/wasm32-unknown-unknown/release/audio.wasm
+#   cargo build     Rust  →  audio/target/wasm32-unknown-unknown/<profile>/audio.wasm
 #   wasm-bindgen    that  →  dist/audio/audio_bg.wasm + audio.js (its JS glue)
-#   wasm-opt        shrinks audio_bg.wasm in place
-#   stamp           touch dist/audio.stamp, which tells the dev server to reload
+#   wasm-opt        shrinks audio_bg.wasm in place (release only)
+#   stamp           dist/audio.stamp, which tells the dev server to reload
+#
+# Two profiles, as for the renderer: `dev` (this crate unoptimized, its
+# dependencies optimized, no wasm-opt; what `task dev` builds and rebuilds on
+# every save) and `release` (what `task build` ships).
 #
 # The audio PROJECT (sounds, worklet modules) is data, not code: it lives in
 # media/audio/ and `task media:build` copies it to dist/audio-project/.
@@ -20,6 +21,7 @@ vars:
   AUDIO_SRC: "{{.ROOT_DIR}}/audio"
   AUDIO_OUT: "{{.ROOT_DIR}}/dist/audio"
   AUDIO_STAMP: "{{.ROOT_DIR}}/dist/audio.stamp"
+  AUDIO_TARGET: "{{.ROOT_DIR}}/audio/target/wasm32-unknown-unknown"
 
   # The post-MVP wasm features stable rustc emits for wasm32-unknown-unknown,
   # which wasm-opt must be told about. The same list, for the same reasons, as
@@ -35,37 +37,33 @@ vars:
     --enable-sign-ext
 
 tasks:
+  dev:
+    desc: "Audio: incremental dev build into dist/audio, then dist/audio.stamp"
+    cmds:
+      - task: cargo
+        vars: { ARGS: "build" }
+      - task: bindgen-dev
+      - task: finish
+        vars: { PROFILE: dev }
+
   release:
-    desc: "Audio: optimized build into dist/audio"
+    desc: "Audio: optimized build into dist/audio, then dist/audio.stamp"
     preconditions:
       - sh: command -v wasm-opt >/dev/null
         msg: "wasm-opt not found. It is part of Binaryen: `brew install binaryen` (macOS) or `apt install binaryen` (Linux)."
-      - sh: command -v wasm-bindgen >/dev/null
-        msg: |
-          wasm-bindgen not found. Install the CLI at exactly the version of the
-          `wasm-bindgen` crate pinned in audio/Cargo.toml (the same pin as
-          renderer/Cargo.toml), for example:
-              cargo install wasm-bindgen-cli --locked --version 0.2.126
     cmds:
       - task: cargo
         vars: { ARGS: "build --release" }
-      - mkdir -p "{{.AUDIO_OUT}}"
-      # `--target web`: an ES module the page imports; its default export
-      # instantiates the wasm, and the named exports are the Rust API.
-      - >-
-        wasm-bindgen --target web --no-typescript
-        --out-name audio
-        --out-dir "{{.AUDIO_OUT}}"
-        "{{.AUDIO_SRC}}/target/wasm32-unknown-unknown/release/audio.wasm"
+      - task: bindgen
+        vars: { PROFILE: release }
       # -Os like the crate's own release profile: the page downloads this on
       # every cold visit, and the per-cue work it does is small.
       - >-
         wasm-opt -Os {{.AUDIO_WASM_FEATURES}}
         "{{.AUDIO_OUT}}/audio_bg.wasm"
         -o "{{.AUDIO_OUT}}/audio_bg.wasm"
-      # Last on purpose: the dev server watches the stamp, and must only
-      # reload the page once every file of the build is in place.
-      - date > "{{.AUDIO_STAMP}}"
+      - task: finish
+        vars: { PROFILE: release }
 
   check:
     desc: "Audio: cargo check, clippy with warnings as errors, and a formatting check"
@@ -105,3 +103,52 @@ tasks:
       - >-
         CARGO_TARGET_DIR="{{.AUDIO_SRC}}/target"
         cargo {{.ARGS}}
+
+  # Turns cargo's .wasm into what the page imports: `audio_bg.wasm` plus
+  # `audio.js`, an ES module (`--target web`) whose default export
+  # instantiates the wasm and whose named exports are the Rust API.
+  bindgen:
+    internal: true
+    requires:
+      vars: [PROFILE]
+    vars:
+      BINDGEN_PIN:
+        sh: sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' "{{.AUDIO_SRC}}/Cargo.toml"
+    preconditions:
+      - sh: command -v wasm-bindgen >/dev/null
+        msg: |
+          wasm-bindgen not found. Install the CLI at exactly the version of the
+          `wasm-bindgen` crate pinned in audio/Cargo.toml (the same pin as
+          renderer/Cargo.toml):
+              cargo install wasm-bindgen-cli --locked --version {{.BINDGEN_PIN}}
+    cmds:
+      # From here until `finish`, dist/audio is half-written: without a
+      # stamp, nothing can mistake it for a finished build.
+      - rm -f "{{.AUDIO_STAMP}}"
+      - mkdir -p "{{.AUDIO_OUT}}"
+      - >-
+        wasm-bindgen --target web --no-typescript
+        --out-name audio
+        --out-dir "{{.AUDIO_OUT}}"
+        "{{.AUDIO_TARGET}}/{{.PROFILE}}/audio.wasm"
+
+  # The dev build's wasm-bindgen step, skipped when dist/ already holds the
+  # output of this very dev build (see the same task in taskfile/renderer.yml).
+  bindgen-dev:
+    internal: true
+    status:
+      - grep -q '^dev ' "{{.AUDIO_STAMP}}"
+      - test "{{.AUDIO_OUT}}/audio_bg.wasm" -nt "{{.AUDIO_TARGET}}/debug/audio.wasm"
+    cmds:
+      - task: bindgen
+        vars: { PROFILE: debug }
+
+  # Writes the stamp ("<profile> <when>"). Last on purpose: the dev server
+  # watches it, and must only reload the page once every file of the build is
+  # in place.
+  finish:
+    internal: true
+    requires:
+      vars: [PROFILE]
+    cmds:
+      - echo "{{.PROFILE}} $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "{{.AUDIO_STAMP}}"

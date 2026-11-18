@@ -25,7 +25,13 @@ static void send_collider(bridge_header *bridge, const char *name, const char *t
 }
 
 void headless_send_scene(bridge_header *bridge) {
-    push(bridge, BRIDGE_RING_RENDERER_TO_APP, &(bridge_record){.type = BRIDGE_SCENE_BEGIN});
+    headless_send_scene_as(bridge, false);
+}
+
+void headless_send_scene_as(bridge_header *bridge, bool used) {
+    bridge_record begin = {.type = BRIDGE_SCENE_BEGIN};
+    begin.u[0] = used ? 1u : 0u;
+    push(bridge, BRIDGE_RING_RENDERER_TO_APP, &begin);
 
     // The colliders of media/bundle/scene.toml, in world space.
     send_collider(bridge, "Tabletop_Collider", "Table", BRIDGE_SHAPE_BOX,
@@ -140,6 +146,9 @@ void headless_drain(bridge_header *bridge, headless_outbox *outbox) {
             break;
         case BRIDGE_CMD_DESPAWN:
             outbox->despawns += 1;
+            break;
+        case BRIDGE_CMD_RELOAD_SCENE:
+            outbox->reloads += 1;
             break;
         default:
             break;

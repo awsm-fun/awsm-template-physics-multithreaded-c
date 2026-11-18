@@ -20,54 +20,26 @@
 //! Nothing on the per-frame path creates a JS object: every view is built once
 //! in [`Bridge::attach`] and reused.
 
+use std::mem::offset_of;
+
 use bytemuck::{Pod, Zeroable};
 use js_sys::{Atomics, Int32Array, SharedArrayBuffer, Uint8Array};
 use wasm_bindgen::JsValue;
 
-/// `BRIDGE_MAGIC`: the bytes 'AWSB', read as a little-endian word.
-pub const MAGIC: u32 = 0x4253_5741;
+// Every number below is copied from bridge.h. `task test` compares them with
+// what the C compiler says (tools/check-bridge.mjs), so keep them in this one
+// region, as plain literals, and use them by name everywhere else.
 
-/// `BRIDGE_VERSION` this renderer understands.
-pub const VERSION: u32 = 1;
+// ── bridge.h mirror: begin (checked by tools/check-bridge.mjs) ──
 
-/// `bridge_record.type` values the renderer produces (`SCENE_*`) or consumes
-/// (`CMD_*`).
-mod record_type {
-    pub const SCENE_BEGIN: u32 = 16;
-    pub const SCENE_COLLIDER: u32 = 17;
-    pub const SCENE_READY: u32 = 18;
-    pub const CMD_BIND: u32 = 32;
-    pub const CMD_SPAWN: u32 = 33;
-    pub const CMD_DESPAWN: u32 = 34;
+/// `BRIDGE_MAGIC` ('AWSB' as a little-endian word) and the `BRIDGE_VERSION`
+/// this renderer understands.
+mod handshake {
+    pub const MAGIC: u32 = 0x4253_5741;
+    pub const VERSION: u32 = 1;
 }
 
-/// `BRIDGE_SHAPE_*`, carried by `SCENE_COLLIDER` records.
-mod shape_code {
-    pub const BOX: u32 = 1;
-    pub const SPHERE: u32 = 2;
-    pub const CAPSULE: u32 = 3;
-    pub const CYLINDER: u32 = 4;
-    pub const CONE: u32 = 5;
-}
-
-/// `BRIDGE_POSE_ACTIVE`: the slot holds a live pose in this snapshot.
-const POSE_ACTIVE: u32 = 1 << 0;
-/// `BRIDGE_POSE_TELEPORT`: the pose jumped this step; do not interpolate into it.
-pub const POSE_TELEPORT: u32 = 1 << 1;
-
-/// `bridge_hash()`: 32-bit FNV-1a of the UTF-8 name. Scene nodes and material
-/// variants are named across the bridge by this hash, so it must produce
-/// exactly what the C and JS versions produce.
-pub fn bridge_hash(name: &str) -> u32 {
-    let mut hash: u32 = 2_166_136_261;
-    for byte in name.bytes() {
-        hash ^= u32::from(byte);
-        hash = hash.wrapping_mul(16_777_619);
-    }
-    hash
-}
-
-/// Byte offsets of the `bridge_header` fields this renderer reads.
+/// Byte offsets of the `bridge_header` fields this renderer reads or writes.
 mod header {
     pub const MAGIC: u32 = 0;
     pub const VERSION: u32 = 4;
@@ -88,22 +60,10 @@ mod header {
     pub const RING_OFFSET: u32 = 72;
     pub const RING_HEADER_SIZE: u32 = 88;
     pub const RECORD_SIZE: u32 = 92;
-
-    /// End of the last field above. A header at least this long has
-    /// everything the renderer needs; anything after it is newer than this
-    /// build and is ignored.
-    pub const READ_SIZE: u32 = 96;
-
     /// Written by the renderer at the start of each frame (bridge.h, "Frame
-    /// pacing"). They took the place of `reserved1` words, so every header
-    /// has room for them; [`FRAME_TIME_END`] is checked anyway.
+    /// pacing").
     pub const FRAME_TIME_US: u32 = 96;
     pub const FRAME_TIME_VALID: u32 = 100;
-    pub const FRAME_TIME_END: u32 = 104;
-
-    /// `BRIDGE_RING_RENDERER_TO_APP` / `BRIDGE_RING_APP_TO_RENDERER`.
-    pub const RING_RENDERER_TO_APP: u32 = 1;
-    pub const RING_APP_TO_RENDERER: u32 = 2;
 }
 
 /// Byte offsets inside `bridge_stats` of the fields the renderer owns.
@@ -114,29 +74,128 @@ mod stats {
     pub const GPU_FRAME_COUNT: u32 = 20;
     pub const FRAME_SPAN_US: u32 = 36;
     pub const APP_LATE: u32 = 40;
-    /// End of the last field above. (The section has been 64 bytes from the
-    /// start, so even an app built before the later fields existed has room
-    /// for them: they were `reserved` words it never touches.)
-    pub const READ_SIZE: u32 = 44;
 }
 
-/// Word offsets inside `bridge_snapshot_header` of the fields read in place
-/// (without copying the snapshot) to find which steps to draw between.
-mod snapshot_word {
+/// Byte offsets inside `bridge_snapshot_header`.
+mod snapshot {
     pub const VERSION: u32 = 0;
-    pub const STEP: u32 = 1;
-    pub const TIME_US: u32 = 3;
+    pub const STEP: u32 = 4;
+    pub const POSE_COUNT: u32 = 8;
+    pub const TIME_US: u32 = 12;
+    pub const CAMERA: u32 = 16;
 }
 
-/// Byte offsets inside `bridge_ring` (the header in front of a ring's records).
+/// Byte offsets inside `bridge_camera`.
+mod camera {
+    pub const EYE: u32 = 0;
+    pub const TARGET: u32 = 12;
+    pub const UP: u32 = 24;
+    pub const FOV_Y: u32 = 36;
+    pub const NEAR: u32 = 40;
+    pub const FAR: u32 = 44;
+}
+
+/// Byte offsets inside `bridge_pose`.
+mod pose {
+    pub const POSITION: u32 = 0;
+    pub const ROTATION: u32 = 12;
+    pub const FLAGS: u32 = 28;
+}
+
+/// Byte offsets inside `bridge_ring` (the header in front of a ring's
+/// records). `dropped` follows; the renderer never discards a record, so it
+/// never writes it.
 mod ring {
     pub const HEAD: u32 = 0;
     pub const TAIL: u32 = 4;
     pub const CAPACITY: u32 = 8;
-    /// End of the fields this renderer reads. (`dropped` follows; the renderer
-    /// never discards a record, so it never writes it.)
-    pub const READ_SIZE: u32 = 12;
 }
+
+/// Byte offsets inside `bridge_record`.
+mod record {
+    pub const TYPE: u32 = 0;
+    pub const STEP: u32 = 4;
+    pub const PAYLOAD: u32 = 8;
+}
+
+/// `sizeof` of the structs, in bytes.
+mod size {
+    pub const CAMERA: u32 = 48;
+    pub const SNAPSHOT_HEADER: u32 = 64;
+    pub const POSE: u32 = 32;
+    pub const RECORD: u32 = 64;
+}
+
+/// `BRIDGE_RING_*`: indices into the header's ring offsets.
+mod ring_index {
+    pub const RENDERER_TO_APP: u32 = 1;
+    pub const APP_TO_RENDERER: u32 = 2;
+}
+
+/// `bridge_record.type` values the renderer produces (`SCENE_*`) or consumes
+/// (`CMD_*`).
+mod record_type {
+    pub const SCENE_BEGIN: u32 = 16;
+    pub const SCENE_COLLIDER: u32 = 17;
+    pub const SCENE_READY: u32 = 18;
+    pub const CMD_BIND: u32 = 32;
+    pub const CMD_SPAWN: u32 = 33;
+    pub const CMD_DESPAWN: u32 = 34;
+    pub const CMD_RELOAD_SCENE: u32 = 35;
+}
+
+/// `BRIDGE_SHAPE_*`, carried by `SCENE_COLLIDER` records.
+mod shape {
+    pub const BOX: u32 = 1;
+    pub const SPHERE: u32 = 2;
+    pub const CAPSULE: u32 = 3;
+    pub const CYLINDER: u32 = 4;
+    pub const CONE: u32 = 5;
+}
+
+/// `BRIDGE_POSE_*` flags.
+mod pose_flag {
+    /// The slot holds a live pose in this snapshot.
+    pub const ACTIVE: u32 = 0x1;
+    /// The pose jumped this step; do not interpolate into it.
+    pub const TELEPORT: u32 = 0x2;
+}
+
+/// What `bridge_hash("foobar")` gives in C: a test vector for the copy below.
+mod hash {
+    pub const FOOBAR: u32 = 0xbf9c_f968;
+}
+
+// ── bridge.h mirror: end ──
+
+/// `BRIDGE_POSE_TELEPORT`, for the code that interpolates poses.
+pub const POSE_TELEPORT: u32 = pose_flag::TELEPORT;
+
+// How much of each struct must exist for this renderer to use it: up to the
+// end of the last field it touches. Anything after that is newer than this
+// build and is ignored, which is what lets the app grow a struct at its end
+// without the renderer being rebuilt (bridge.h, rule 1).
+const HEADER_READ_SIZE: u32 = header::FRAME_TIME_VALID + 4;
+const STATS_READ_SIZE: u32 = stats::APP_LATE + 4;
+const RING_READ_SIZE: u32 = ring::CAPACITY + 4;
+
+/// `bridge_hash()`: 32-bit FNV-1a of the UTF-8 name. Scene nodes and material
+/// variants are named across the bridge by this hash, so it must produce
+/// exactly what the C and JS versions produce. (A `const fn`, hence the plain
+/// loop, so that the assert below can hold it to the C test vector at compile
+/// time.)
+pub const fn bridge_hash(name: &str) -> u32 {
+    let bytes = name.as_bytes();
+    let mut hash: u32 = 2_166_136_261;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u32;
+        hash = hash.wrapping_mul(16_777_619);
+        i += 1;
+    }
+    hash
+}
+const _: () = assert!(bridge_hash("foobar") == hash::FOOBAR);
 
 /// `bridge_camera`.
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -223,16 +282,36 @@ pub enum Command {
     Spawn { slot: u32, node: u32, variant: u32 },
     /// `BRIDGE_CMD_DESPAWN`: undo whatever `Bind` or `Spawn` set up for `slot`.
     Despawn { slot: u32 },
+    /// `BRIDGE_CMD_RELOAD_SCENE`: throw the scene away and load it again.
+    ReloadScene,
     /// A record type this build does not know. Records are fixed-size and
     /// tagged precisely so that such a record can simply be skipped.
     Unknown { kind: u32 },
 }
 
-// The same guards as the `static_assert`s at the end of bridge.h.
-const _: () = assert!(size_of::<Camera>() == 48);
-const _: () = assert!(size_of::<Pose>() == 32);
-const _: () = assert!(size_of::<SnapshotHeader>() == 64);
-const _: () = assert!(size_of::<Record>() == 64);
+// Tie the decoding structs to the checked constants: if bridge.h changes and
+// the mirror above is updated, these fail until the structs follow.
+const _: () = assert!(size_of::<Camera>() == size::CAMERA as usize);
+const _: () = assert!(offset_of!(Camera, eye) == camera::EYE as usize);
+const _: () = assert!(offset_of!(Camera, target) == camera::TARGET as usize);
+const _: () = assert!(offset_of!(Camera, up) == camera::UP as usize);
+const _: () = assert!(offset_of!(Camera, fov_y) == camera::FOV_Y as usize);
+const _: () = assert!(offset_of!(Camera, near) == camera::NEAR as usize);
+const _: () = assert!(offset_of!(Camera, far) == camera::FAR as usize);
+const _: () = assert!(size_of::<Pose>() == size::POSE as usize);
+const _: () = assert!(offset_of!(Pose, position) == pose::POSITION as usize);
+const _: () = assert!(offset_of!(Pose, rotation) == pose::ROTATION as usize);
+const _: () = assert!(offset_of!(Pose, flags) == pose::FLAGS as usize);
+const _: () = assert!(size_of::<SnapshotHeader>() == size::SNAPSHOT_HEADER as usize);
+const _: () = assert!(offset_of!(SnapshotHeader, version) == snapshot::VERSION as usize);
+const _: () = assert!(offset_of!(SnapshotHeader, step) == snapshot::STEP as usize);
+const _: () = assert!(offset_of!(SnapshotHeader, pose_count) == snapshot::POSE_COUNT as usize);
+const _: () = assert!(offset_of!(SnapshotHeader, time_us) == snapshot::TIME_US as usize);
+const _: () = assert!(offset_of!(SnapshotHeader, camera) == snapshot::CAMERA as usize);
+const _: () = assert!(size_of::<Record>() == size::RECORD as usize);
+const _: () = assert!(offset_of!(Record, kind) == record::TYPE as usize);
+const _: () = assert!(offset_of!(Record, step) == record::STEP as usize);
+const _: () = assert!(offset_of!(Record, payload) == record::PAYLOAD as usize);
 
 /// A record seen as the sixteen 32-bit words that cross the bridge.
 type RecordWords = [u32; size_of::<Record>() / 4];
@@ -245,28 +324,31 @@ impl Record {
         }
     }
 
-    /// `BRIDGE_SCENE_BEGIN`: a scene description follows.
-    pub fn scene_begin() -> Self {
-        Self::new(record_type::SCENE_BEGIN)
+    /// `BRIDGE_SCENE_BEGIN`: a scene description follows. `used`: an earlier
+    /// app instance has driven this scene (the app was hot-swapped).
+    pub fn scene_begin(used: bool) -> Self {
+        let mut record = Self::new(record_type::SCENE_BEGIN);
+        record.payload[0] = u32::from(used);
+        record
     }
 
     /// `BRIDGE_SCENE_COLLIDER`.
     pub fn scene_collider(collider: &Collider) -> Self {
         let (code, dimensions) = match collider.shape {
-            Shape::Box { half_extents } => (shape_code::BOX, half_extents),
-            Shape::Sphere { radius } => (shape_code::SPHERE, [radius, 0.0, 0.0]),
+            Shape::Box { half_extents } => (shape::BOX, half_extents),
+            Shape::Sphere { radius } => (shape::SPHERE, [radius, 0.0, 0.0]),
             Shape::Capsule {
                 half_height,
                 radius,
-            } => (shape_code::CAPSULE, [half_height, radius, 0.0]),
+            } => (shape::CAPSULE, [half_height, radius, 0.0]),
             Shape::Cylinder {
                 half_height,
                 radius,
-            } => (shape_code::CYLINDER, [half_height, radius, 0.0]),
+            } => (shape::CYLINDER, [half_height, radius, 0.0]),
             Shape::Cone {
                 half_height,
                 radius,
-            } => (shape_code::CONE, [half_height, radius, 0.0]),
+            } => (shape::CONE, [half_height, radius, 0.0]),
         };
         let mut record = Self::new(record_type::SCENE_COLLIDER);
         record.payload[0] = collider.name;
@@ -306,6 +388,7 @@ impl Record {
                 variant,
             },
             record_type::CMD_DESPAWN => Command::Despawn { slot },
+            record_type::CMD_RELOAD_SCENE => Command::ReloadScene,
             kind => Command::Unknown { kind },
         }
     }
@@ -414,6 +497,7 @@ pub struct Snapshot<'a> {
 }
 
 /// The snapshots around one display position, ready to interpolate.
+#[derive(Default)]
 pub struct Sample<'a> {
     /// The snapshot at or just before the display position. `None` only if
     /// nothing readable has been published.
@@ -442,7 +526,7 @@ impl Bridge {
                 "the bridge pointer {bridge_ptr:#x} is not 4-byte aligned"
             ));
         }
-        if block_start + u64::from(header::READ_SIZE) > memory_size {
+        if block_start + u64::from(HEADER_READ_SIZE) > memory_size {
             return Err(format!(
                 "the bridge pointer {bridge_ptr:#x} lies outside the app memory ({memory_size} bytes)"
             ));
@@ -451,27 +535,29 @@ impl Bridge {
         // Look at the header alone first: nothing else in the block can be
         // trusted until the handshake has passed.
         let head =
-            Int32Array::new_with_byte_offset_and_length(buffer, bridge_ptr, header::READ_SIZE / 4);
+            Int32Array::new_with_byte_offset_and_length(buffer, bridge_ptr, HEADER_READ_SIZE / 4);
         let field = |offset: u32| head.get_index(offset / 4) as u32;
 
         let magic = field(header::MAGIC);
-        if magic != MAGIC {
+        if magic != handshake::MAGIC {
             return Err(format!(
-                "no bridge block at {bridge_ptr:#x}: expected magic {MAGIC:#010x}, found {magic:#010x}"
+                "no bridge block at {bridge_ptr:#x}: expected magic {:#010x}, found {magic:#010x}",
+                handshake::MAGIC
             ));
         }
         let version = field(header::VERSION);
-        if version != VERSION {
+        if version != handshake::VERSION {
             return Err(format!(
                 "bridge version mismatch: the app speaks version {version}, this renderer speaks \
-                 version {VERSION}. Rebuild the renderer against the app's bridge.h."
+                 version {}. Rebuild the renderer against the app's bridge.h.",
+                handshake::VERSION
             ));
         }
 
         let total_size = field(header::TOTAL_SIZE);
         let header_size = field(header::HEADER_SIZE);
         let total = u64::from(total_size);
-        if header_size < header::FRAME_TIME_END
+        if header_size < HEADER_READ_SIZE
             || total_size < header_size
             || !total_size.is_multiple_of(4)
             || block_start + total > memory_size
@@ -492,7 +578,7 @@ impl Bridge {
         // ── stats ──
         let stats_offset = field(header::STATS_OFFSET);
         let stats_size = field(header::STATS_SIZE);
-        if stats_size < stats::READ_SIZE {
+        if stats_size < STATS_READ_SIZE {
             return Err(format!(
                 "the stats section is too small ({stats_size} bytes)"
             ));
@@ -530,7 +616,7 @@ impl Bridge {
         // ── event rings ──
         let ring_header_size = field(header::RING_HEADER_SIZE);
         let record_size = field(header::RECORD_SIZE);
-        if ring_header_size < ring::READ_SIZE
+        if ring_header_size < RING_READ_SIZE
             || !ring_header_size.is_multiple_of(4)
             || (record_size as usize) < size_of::<Record>()
             || !record_size.is_multiple_of(4)
@@ -564,8 +650,8 @@ impl Bridge {
                 own: 0,
             })
         };
-        let mut to_app = open_ring(header::RING_RENDERER_TO_APP, "renderer-to-app")?;
-        let mut from_app = open_ring(header::RING_APP_TO_RENDERER, "app-to-renderer")?;
+        let mut to_app = open_ring(ring_index::RENDERER_TO_APP, "renderer-to-app")?;
+        let mut from_app = open_ring(ring_index::APP_TO_RENDERER, "app-to-renderer")?;
         // Carry on from wherever each ring currently stands.
         to_app.own = load(&words, to_app.head);
         from_app.own = load(&words, from_app.tail);
@@ -642,9 +728,13 @@ impl Bridge {
     /// stall.
     pub fn sample_at(&mut self, display_us: Option<u32>) -> (Sample<'_>, bool) {
         let latest = self.latest_step();
+        if latest == 0 {
+            // Steps count from 1: the app has published nothing yet.
+            return (Sample::default(), false);
+        }
         let (older, newer, alpha, late) = match display_us {
-            Some(display_us) if latest != 0 => self.bracket(latest, display_us),
-            _ => (latest, None, 0.0, false),
+            Some(display_us) => self.bracket(latest, display_us),
+            None => (latest, None, 0.0, false),
         };
 
         let mut older_copy = self.fetch(older, None);
@@ -683,8 +773,10 @@ impl Bridge {
         // Signed, because the frame clock wraps.
         let after = |time: u32| time.wrapping_sub(display_us) as i32 > 0;
         if !after(latest_time) {
-            // The app has not published that far yet.
-            return (latest, None, 0.0, true);
+            // The app has not published past that moment yet: hold its newest
+            // step. (Exactly AT the moment, the newest step is the right
+            // picture and the app is not late.)
+            return (latest, None, 0.0, latest_time != display_us);
         }
         // Walk back to the newest step at or before the moment. While this
         // runs the app may be writing its next burst, which only ever adds
@@ -694,6 +786,9 @@ impl Bridge {
         let mut newer_time = latest_time;
         for _ in 1..self.snapshots.count {
             let step = newer.wrapping_sub(1);
+            if step == 0 {
+                break; // steps count from 1: there is nothing before step 1
+            }
             let Some(time) = self.step_time(step) else {
                 break;
             };
@@ -718,13 +813,13 @@ impl Bridge {
     fn step_time(&self, step: u32) -> Option<u32> {
         let ring = &self.snapshots;
         let first = ring.first_word + (step & (ring.count - 1)) * ring.stride_words;
-        let before = load(&self.words, first + snapshot_word::VERSION);
+        let before = load(&self.words, first + snapshot::VERSION / 4);
         if before & 1 != 0 {
             return None;
         }
-        let held = load(&self.words, first + snapshot_word::STEP);
-        let time = load(&self.words, first + snapshot_word::TIME_US);
-        if load(&self.words, first + snapshot_word::VERSION) != before || held != step {
+        let held = load(&self.words, first + snapshot::STEP / 4);
+        let time = load(&self.words, first + snapshot::TIME_US / 4);
+        if load(&self.words, first + snapshot::VERSION / 4) != before || held != step {
             return None;
         }
         Some(time)
@@ -940,7 +1035,7 @@ impl<'a> Snapshot<'a> {
         let start = self.layout.header_size + slot * self.layout.pose_stride;
         let pose: Pose =
             bytemuck::pod_read_unaligned(&self.bytes[start..start + size_of::<Pose>()]);
-        (pose.flags & POSE_ACTIVE != 0).then_some(pose)
+        (pose.flags & pose_flag::ACTIVE != 0).then_some(pose)
     }
 }
 

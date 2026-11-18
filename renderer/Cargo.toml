@@ -68,9 +68,10 @@ features = [
     "RequestCache",
 ]
 
-# `task renderer:debug`. Our own crate stays unoptimized so it rebuilds fast;
-# the dependencies (the renderer does real per-frame work) are built once at
-# full optimization, otherwise frame times are unusable.
+# `task renderer:dev`, which `task dev` runs on every save. Our own crate
+# stays unoptimized so it rebuilds in a couple of seconds; the dependencies
+# (awsm-renderer does the real per-frame work) are built once at full
+# optimization, otherwise frame times are unusable.
 [profile.dev.package."*"]
 opt-level = 3
 

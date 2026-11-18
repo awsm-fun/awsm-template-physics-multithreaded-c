@@ -189,7 +189,8 @@ static void put_back(app_state *app, app_ball *ball) {
     }
 }
 
-// R: clear every dropped ball and put the player's ball back at the start.
+// Enter: clear every dropped ball and put the player's ball back at the
+// start. (R goes further and reloads the whole scene: app_reload_scene.)
 static void reset(app_state *app) {
     for (int slot = APP_PLAYER_SLOT + 1; slot < APP_MAX_BALLS; ++slot) {
         app_ball *ball = &app->balls[slot];
@@ -220,7 +221,7 @@ static void drop_ball_at(app_state *app, float ndc_x, float ndc_y) {
         }
     }
     if (slot < 0) {
-        printf("app: all %d balls are in play; press R to clear them\n", APP_MAX_BALLS);
+        printf("app: all %d balls are in play; press Enter to clear them\n", APP_MAX_BALLS);
         return;
     }
 
@@ -258,11 +259,43 @@ static void destroy_bodies(app_state *app) {
     app->scene.ready = false;
 }
 
-static void scene_begin(app_state *app) {
-    // The renderer is describing its scene from a clean baseline: anything we
+void app_reload_scene(app_state *app) {
+    if (app->reload_pending) {
+        return; // already asked
+    }
+    bridge_record rec = {.type = BRIDGE_CMD_RELOAD_SCENE, .step = app->step};
+    if (!bridge_ring_push(bridge_get_ring(app->bridge, BRIDGE_RING_APP_TO_RENDERER), &rec)) {
+        fprintf(stderr, "app: command ring full, the scene was not reloaded\n");
+        return;
+    }
+    // The scene is going away: stop simulating it now, rather than play on
+    // in a world the renderer is about to replace.
+    destroy_bodies(app);
+    app->collider_count = 0;
+    app->reload_pending = true;
+}
+
+// A scene description is starting: the world begins again from nothing, as
+// it was when the app started. Reset your own game state here too.
+static void scene_begin(app_state *app, bool used_by_a_previous_app) {
+    // The renderer describes its scene from a clean baseline: anything we
     // bound or spawned before is gone on its side, so forget it here too.
     destroy_bodies(app);
     app->collider_count = 0;
+    app->last_floor_cue_step = 0;
+    app->last_wall_cue_step = 0;
+    app->last_ball_cue_step = 0;
+    app->orbiting = false;
+    app->swipe.active = false;
+    app->camera = camera_default(vec3_make(0.0f, CAMERA_TARGET_LIFT, 0.0f));
+
+    if (!used_by_a_previous_app) {
+        app->reload_pending = false; // this is the fresh scene
+    } else if (APP_RELOAD_SCENE_ON_HOT_SWAP) {
+        // This app was hot-swapped into a scene another build has been
+        // playing with. Skip its description and ask for a clean one.
+        app_reload_scene(app);
+    }
 }
 
 static void scene_collider(app_state *app, const bridge_record *rec) {
@@ -411,13 +444,17 @@ static void read_scene(app_state *app) {
     while (bridge_ring_pop(ring, &rec)) {
         switch (rec.type) {
         case BRIDGE_SCENE_BEGIN:
-            scene_begin(app);
+            scene_begin(app, rec.u[0] != 0);
             break;
         case BRIDGE_SCENE_COLLIDER:
-            scene_collider(app, &rec);
+            if (!app->reload_pending) {
+                scene_collider(app, &rec);
+            }
             break;
         case BRIDGE_SCENE_READY:
-            scene_ready(app);
+            if (!app->reload_pending) {
+                scene_ready(app);
+            }
             break;
         default:
             break; // a record type this app does not know: skip it
@@ -563,8 +600,10 @@ static void key_event(app_state *app, uint32_t key, bool down) {
     }
     if (key == BRIDGE_KEY_SPACE) {
         jump(app);
-    } else if (key == BRIDGE_KEY_R) {
+    } else if (key == BRIDGE_KEY_ENTER) {
         reset(app);
+    } else if (key == BRIDGE_KEY_R) {
+        app_reload_scene(app);
     }
 }
 

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Box3D physics in C · Rust renderer · JS page</title>
     <link rel="icon" href="data:," />
-    <!-- coi-serviceworker (`task build COI=1` replaces this line with the shim's script tag) -->
+    <!-- coi-serviceworker (`task build` replaces this line with the shim's script tag) -->
     <link rel="stylesheet" href="style.css" />
     <script type="module" src="main.js"></script>
   </head>
@@ -54,10 +54,11 @@
             </li>
           </ul>
           <p>
-            Roll the red ball with WASD, jump with Space, click the table to drop more balls (R
-            clears them) — every impact is synthesized and spatialized in real time from the
-            physics contacts. Drag with the right mouse button to orbit the camera and scroll to
-            zoom; the controls and the stereo image stay relative to your view from any angle.
+            Roll the red ball with WASD, jump with Space, click the table to drop more balls (Enter
+            clears them; R reloads the whole scene) — every impact is synthesized and
+            spatialized in real time from the physics contacts. Drag with the right mouse button
+            to orbit the camera and scroll to zoom; the controls and the stereo image stay relative
+            to your view from any angle.
           </p>
           <p>
             The stats panel (the Stats button, bottom left) shows each thread live: the
@@ -83,7 +84,7 @@
           <button class="about-close" type="button" aria-label="Close" data-close>×</button>
           <h2>Settings</h2>
           <div class="settings-row">
-            <label class="settings-label" id="res-label">Resolution — 100%</label>
+            <label class="settings-label" id="res-label" for="res-slider">Resolution — 100%</label>
             <input
               class="res-slider"
               id="res-slider"
@@ -95,7 +96,7 @@
             />
           </div>
           <div class="settings-row">
-            <label class="settings-label">Anti-aliasing</label>
+            <label class="settings-label" for="aa-select">Anti-aliasing</label>
             <select class="settings-select" id="aa-select" aria-label="anti-aliasing">
               <option value="off">Off</option>
               <option value="smaa">SMAA</option>
@@ -135,7 +136,8 @@
 
     <!-- In the static HTML so it shows the moment the page arrives, while the
          workers are still downloading and compiling. loading.js appends the
-         progress lines and fades it out when the first frame is up. -->
+         progress lines, fades it out when the first frames are up, and shows
+         it again while the scene is reloaded. -->
     <div id="loading">
       <div class="orb"></div>
       <div class="title">

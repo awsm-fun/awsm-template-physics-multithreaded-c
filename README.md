@@ -39,7 +39,8 @@ submodule, with its solver running on several threads):
 | mouse wheel | zoom |
 | touch: swipe | throw the red ball |
 | touch: tap | drop a new ball |
-| R | clear the dropped balls and reset the red one |
+| Enter | clear the dropped balls and reset the red one |
+| R | reload the whole scene (same page, same GPU device) |
 
 Sound is an [awsm-audio](https://github.com/awsm-fun/awsm-audio) project
 played on the page: a rolling rumble that follows the red ball's speed, and
@@ -55,9 +56,12 @@ app's CPU time per simulation step, steps per second, frames the app was late
 for (its steps did not finish within a frame), Box3D's thread count, the
 number of dropped balls and the last impact cue; **About** (bottom
 centre); and **Settings** (bottom right): the render resolution and the
-anti-aliasing (Off, SMAA, 4× MSAA). Touch devices and software GPUs start at
-lower defaults; choices are remembered in `localStorage`, and `?reset` in the
-URL forgets them.
+anti-aliasing (Off, SMAA, 4× MSAA). The resolution starts at native, held to
+a budget of 2.8 million pixels (so a big high-DPI window starts below 100%);
+touch devices and software GPUs start lower. Choices are remembered in
+`localStorage` and always win; `?reset` in the URL forgets them. The storage
+keys share one prefix (`STORAGE_PREFIX` in `dom/settings.js`): change it for
+your own project, since everything on the same origin shares `localStorage`.
 
 ## Quick start
 
@@ -96,10 +100,9 @@ task dev     # build everything, serve at http://127.0.0.1:8000, open a browser,
 ```
 
 The first `task dev` compiles the two Rust modules from scratch: the renderer,
-which takes several minutes (about 4.5 minutes on a cold cargo cache) and
-produces a wasm file of about 5 MB, and the much smaller audio module. After
-that they are only rebuilt when you ask for it, so everyday iteration never
-recompiles Rust.
+which takes several minutes on a cold cargo cache, and the much smaller audio
+module. After that each is rebuilt incrementally, in seconds, and only when
+one of its own files changes: working on the C app never runs cargo.
 
 Development has been on macOS with Chrome. The checks and the release build
 also run on Ubuntu in CI (`.github/workflows/`), which doubles as a recipe for
@@ -127,7 +130,7 @@ setting up Linux; other browsers with WebGPU have not been tried.
  │  snapshots  ring of 32 world states (camera + poses)     app      → renderer│
  │  ring       key / pointer / wheel events, frame marks    dom      → app     │
  │  ring       scene description (colliders)                renderer → app     │
- │  ring       bind / spawn / despawn commands              app      → renderer│
+ │  ring       bind / spawn / despawn / reload commands     app      → renderer│
  │  ring       cues (sound, UI)                             app      → dom     │
  └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -136,9 +139,10 @@ setting up Linux; other browsers with WebGPU have not been tried.
 the renderer, the app worker sends the page its memory and the block's address,
 and the page forwards both to the renderer (`attach`). After that it carries
 only rare messages: a new canvas size (`resize`, also how the resolution
-setting is applied), an anti-aliasing change (`anti-alias`) and the
-renderer's progress back while it recompiles for one. Nothing per-frame goes
-through `postMessage`.
+setting is applied), an anti-aliasing change (`anti-alias`), and the
+renderer's progress back while it recompiles for one or loads the scene again
+(`loading`, `progress`, `ready`). Nothing per-frame goes through
+`postMessage`.
 
 ### Directory layout
 
@@ -155,7 +159,8 @@ app/                  the C app: a CMake project (CMakeLists.txt, CMakePresets.j
   src/web_main.c      browser entry point (app_start, app_run)
   src/main.c          native entry point: a headless run with no browser
   src/headless.c      stand-ins for the page and renderer, for native runs and tests
-  tests/              native tests (test_app.c, test_bridge.c)
+  tests/              native tests (test_app.c, test_bridge.c) and bridge_layout.c,
+                      which prints the layout for the mirror check
   web/worker.js       the worker script that loads app.js + app.wasm
 audio/                a second Rust crate: plays the sound, on the main thread
   src/lib.rs          the small API the page calls (load, start, roll, wallHit, …)
@@ -171,7 +176,8 @@ dom/                  the page: index.html, main.js, bridge.js (mirror of bridge
                       and the panels: settings.js, stats.js, about.js, loading.js, modal.js
 media/bundle/         the scene: scene.toml + assets/ (KTX2 textures)
 media/audio/          the sounds: an awsm-audio export (project.toml + assets/)
-tools/                dev-server.mjs (dev server), coi-serviceworker.js (header shim)
+tools/                dev-server.mjs (dev server), check-bridge.mjs (mirror check),
+                      coi-serviceworker.js (header shim)
 Taskfile.yml          entry point for every workflow; the steps live in taskfile/*.yml
 dist/                 build output (git-ignored); deployable as it is
 ```
@@ -212,30 +218,40 @@ bridge block.
 
 Run `task dev` and leave it running. It serves `dist/` at
 http://127.0.0.1:8000 with the headers shared memory needs, and watches the
-sources:
+sources. Each watcher rebuilds only its own part (the watched paths are
+disjoint and contain no build output), so a C save never runs cargo:
 
 | You edit | What happens |
 | --- | --- |
-| anything under `app/src`, `app/web`, `app/cmake`, or `app/CMakeLists.txt` / `app/CMakePresets.json` | the app is rebuilt (`task app:dev`) and only the app worker is swapped. No page reload; the renderer keeps its scene. About 2.5 seconds from save to the new code running. |
-| anything under `dom/` | the files are copied to `dist/` and the page reloads |
-| `renderer/` | not watched. Run `task renderer:release` (or the faster, unoptimized `task renderer:debug`) in another terminal; the page reloads when it finishes. |
-| `audio/` | not watched. Run `task audio:release`; the page reloads. |
-| `media/bundle/`, `media/audio/` | not watched. Run `task media:build`; the page reloads. |
+| `app/src`, `app/web`, `app/cmake`, `app/CMakeLists.txt` | the app is rebuilt (`task app:dev`) and only the app worker is swapped. No page reload. |
+| `renderer/src`, `renderer/web`, `renderer/Cargo.toml` | `task renderer:dev` (this crate unoptimized, dependencies optimized, no wasm-opt: a few seconds), then the page reloads |
+| `audio/src`, `audio/Cargo.toml` | `task audio:dev`, then the page reloads |
+| `dom/` | the files are copied to `dist/` and the page reloads |
+| `media/`, `renderer/vendored/` | `task media:build` (a copy), then the page reloads |
 
-A hot-swapped app starts from a fresh state: `app_init` runs again, the
-renderer puts every object back where the scene file has it and describes the
-scene to the new app again. `printf` output from C appears in the browser
-console prefixed with `[app]`. If a build fails, the page keeps running the last
-good build and the compiler errors show in the terminal.
+A hot-swapped app starts from a fresh state: `app_init` runs again and the
+renderer describes the scene to the new app. With
+`APP_RELOAD_SCENE_ON_HOT_SWAP` at `1` (the default, in `app/src/app.h`) the
+new app also asks the renderer to load the scene again, so every save starts
+from the bundle whatever the previous build did to the world; the loading
+screen shows while that takes. At `0` it takes over the renderer's current
+world (every bind and spawn of the previous app undone), which is instant.
+Either way the page and the WebGPU device stay.
+
+`printf` output from C appears in the browser console prefixed with `[app]`.
+If a build fails, the page keeps running the last good build, the compiler
+errors show in the terminal, and the other watchers keep going. After changing
+`app/CMakePresets.json`, run `task app:clean` (a preset is only read when a
+build tree is first configured).
 
 Variables for `task dev`: `RELOAD=page` reloads the whole page on every change
 instead of swapping the app; `OPEN=` does not open a browser; `PORT=9000`
 changes the port.
 
-`task dev` builds the renderer only if `dist/renderer.stamp` is missing, and
-the audio module only if `dist/audio.stamp` is. Note that `task clean`,
-`task renderer:clean` and `task audio:clean` delete cargo's `target/`
-directories, so the next build compiles from scratch again.
+`task dev` builds the dev profile of both Rust modules; `task build` builds
+the release profile (LTO, wasm-opt), which cargo keeps separately. Note that
+`task clean`, `task renderer:clean` and `task audio:clean` delete cargo's
+`target/` directories, so the next build compiles from scratch again.
 
 ### Tasks
 
@@ -244,10 +260,10 @@ Run `task` (or `task --list`) for this list.
 | Task | What it does |
 | --- | --- |
 | `task setup` | Check the toolchain (with install hints), then configure the C presets for clangd |
-| `task dev` | Build, serve at http://127.0.0.1:8000 and rebuild on change |
+| `task dev` | Build, serve at http://127.0.0.1:8000, and on every save rebuild just the part that changed |
 | `task build` | Release build of everything into a fresh `dist/`, deployable to any static host as it is (`COI=0` leaves out the header shim) |
 | `task serve` | Release build, then serve it (no watching) |
-| `task test` | Build and run the native app tests (debug, AddressSanitizer + UBSan) |
+| `task test` | Build and run the native app tests (debug, AddressSanitizer + UBSan), including the check that the Rust and JS mirrors of `bridge.h` match it |
 | `task check` | Everything CI runs: clean configure, build and test of the app (native debug, native release, wasm) and the renderer and audio checks |
 | `task fmt` | Format the C and Rust sources |
 | `task clean` | Delete all build output (`dist/`, `app/build/`, the Rust `target/` directories) |
@@ -259,10 +275,11 @@ Run `task` (or `task --list`) for this list.
 | `task app:debug` | Native debug build (AddressSanitizer + UBSan) |
 | `task app:setup` | Configure the `debug` and `wasm-dev` presets so clangd has both compile databases |
 | `task app:fmt` / `task app:clean` | Format the C sources / delete `app/build/` |
+| `task renderer:dev` | Incremental renderer build into `dist/renderer/` (own code unoptimized, dependencies optimized, no wasm-opt) |
 | `task renderer:release` | Optimized renderer build into `dist/renderer/` |
-| `task renderer:debug` | Faster renderer build (own code unoptimized, dependencies optimized, no wasm-opt) |
 | `task renderer:check` | `cargo check`, `clippy` with warnings as errors, and a format check |
 | `task renderer:fmt` / `task renderer:clean` | Format the Rust sources / remove `target/` and the built renderer |
+| `task audio:dev` | Incremental audio module build into `dist/audio/` |
 | `task audio:release` | Optimized audio module build into `dist/audio/` |
 | `task audio:check` | `cargo check`, `clippy` with warnings as errors, and a format check |
 | `task audio:fmt` / `task audio:clean` | Format the Rust sources / remove `target/` and the built module |
@@ -298,6 +315,12 @@ pose for that slot every step. Set the pose's `BRIDGE_POSE_TELEPORT` flag when
 an object jumps (the demo does this through `app_ball.teleported`), so
 the renderer does not slide it across the world. Send sounds and UI events to
 the page with `send_cue()`.
+
+To start over, call `app_reload_scene()` (R in the demo): the renderer
+destroys everything, loads the scene bundle again on the same GPU device and
+page, and describes the fresh scene exactly as after the first load. The app
+empties its Box3D world at once and rebuilds it when that description
+arrives; reset your own game state in `scene_begin()`.
 
 Express rates per second and multiply by `dt`. Then `APP_STEP_HZ` changes the
 step size, not the speed of the game.
@@ -421,7 +444,9 @@ To add a key the page does not report yet, for example F:
 
 1. `app/src/bridge.h`: add `BRIDGE_KEY_F = 14,` after `BRIDGE_KEY_R` (there is
    room up to `BRIDGE_KEY_COUNT`, 64).
-2. `dom/bridge.js`: add `F: 14,` to `KEY`.
+2. `dom/bridge.js`: add `F: 14,` to `LAYOUT.key`, and
+   `app/tests/bridge_layout.c`: add `entry("f", BRIDGE_KEY_F);` (the mirror
+   check only accepts names that file prints).
 3. `dom/main.js`: add `KeyF: KEY.F,` to `KEY_CODES` (the keys are
    `KeyboardEvent.code` values, so the physical key is the same on every
    layout).
@@ -436,10 +461,11 @@ is not rebuilt.
 
 Discrete events travel as 64-byte `bridge_record`s: a `type`, the app `step`,
 and 14 payload words readable as `u[i]` (unsigned) or `f[i]` (float). The
-existing types are grouped by direction (1–5 page to app, 16–18 renderer to
-app, 32–34 app to renderer, 48 app to page). Add a new type to the enum in
-`app/src/bridge.h`, next to its group, and document its payload there. Every
-consumer skips types it does not know.
+existing types are grouped by direction (1–6 page to app, 16–18 renderer to
+app, 32–35 app to renderer, 48 app to page). Add a new type to the enum in
+`app/src/bridge.h`, next to its group, and document its payload there; add it
+to `app/tests/bridge_layout.c` and to the mirror that uses it. Every consumer
+skips types it does not know.
 
 Whether the renderer needs rebuilding depends only on whether it has to
 understand the new record:
@@ -447,7 +473,7 @@ understand the new record:
 | Direction | Producer | Consumer | Renderer rebuild? |
 | --- | --- | --- | --- |
 | page → app | a new `send…` method on `Bridge` in `dom/bridge.js` (built on its private `#push`) | `read_user_input()` in `app.c` | no |
-| app → page | `bridge_ring_push()` on `BRIDGE_RING_APP_TO_DOM` | the `bridge.drain()` callback in `dom/main.js` (add the type to `RECORD` in `dom/bridge.js`) | no |
+| app → page | `bridge_ring_push()` on `BRIDGE_RING_APP_TO_DOM` | the `bridge.drain()` callback in `dom/main.js` (add the type to `LAYOUT.record_type` in `dom/bridge.js`) | no |
 | app → renderer | `bridge_ring_push()` on `BRIDGE_RING_APP_TO_RENDERER` | `renderer/src/bridge.rs`, `render.rs`, `slots.rs` | yes |
 | renderer → app | `renderer/src/bridge.rs` and `render.rs` | `read_scene()` in `app.c` | yes |
 
@@ -469,7 +495,8 @@ rec.u[0] = score;
 ```
 
 ```js
-// dom/bridge.js, in RECORD:
+// dom/bridge.js, in LAYOUT.record_type (and entry("ui_score", BRIDGE_UI_SCORE)
+// in app/tests/bridge_layout.c):
   UI_SCORE: 49,
 
 // dom/main.js, at the top of the bridge.drain() callback in frame():
@@ -496,7 +523,10 @@ if (record.type === RECORD.UI_SCORE) {
 `app/src/bridge.h` is the source of truth. It documents every field, every
 record payload and the rules below; `renderer/src/bridge.rs` and
 `dom/bridge.js` mirror it, and are the only files in their halves of the
-project that know byte offsets. This section is the overview.
+project that know byte offsets. The mirrors cannot drift silently:
+`app/tests/bridge_layout.c` prints the layout as the C compiler sees it, and
+`tools/check-bridge.mjs` compares both mirrors with it (the `bridge_mirrors`
+test of `task test`). This section is the overview.
 
 **Frame pacing.** This is Glenn Fiedler's
 [Fix Your Timestep](https://gafferongames.com/post/fix_your_timestep/) (fixed
@@ -549,7 +579,8 @@ belongs to.
 tagged records: page → app (input events), renderer → app (the scene
 description: `BRIDGE_SCENE_BEGIN`, one `BRIDGE_SCENE_COLLIDER` per collider,
 `BRIDGE_SCENE_READY`), app → renderer (`BRIDGE_CMD_BIND`, `BRIDGE_CMD_SPAWN`,
-`BRIDGE_CMD_DESPAWN`), and app → page (`BRIDGE_CUE`). Names never cross as
+`BRIDGE_CMD_DESPAWN`, `BRIDGE_CMD_RELOAD_SCENE`), and app → page
+(`BRIDGE_CUE`). Names never cross as
 strings: scene nodes and material variants are identified by `bridge_hash()`,
 a 32-bit FNV-1a hash that C, Rust and JavaScript compute identically.
 
@@ -572,8 +603,8 @@ table at attach time, never from constants. Layout changes are additive:
 add fields, append record types, grow capacities, add sections. None of that
 requires rebuilding the renderer, which is why normal C iteration never
 touches Rust. A change in meaning bumps `BRIDGE_VERSION` (in `bridge.h`, and
-the matching constants `VERSION` in `renderer/src/bridge.rs` and
-`BRIDGE_VERSION` in `dom/bridge.js`). On a mismatch the renderer and the page
+the matching constants `handshake::VERSION` in `renderer/src/bridge.rs` and
+`LAYOUT.handshake.version` in `dom/bridge.js`). On a mismatch the renderer and the page
 refuse to attach and say so on the page, instead of drawing garbage. The
 `static_assert` layout guards at the end of `bridge.h` catch a field that moved
 by accident.

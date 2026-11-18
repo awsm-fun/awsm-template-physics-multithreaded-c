@@ -24,9 +24,9 @@
 //
 // This file wires them to the workers, and owns the input and the sound.
 
-import { Bridge, KEY, POINTER, RECORD, frameClockUs } from './bridge.js';
+import { BUTTON_CANCELLED, Bridge, KEY, POINTER, RECORD, frameClockUs } from './bridge.js';
 import { installAbout } from './about.js';
-import { APP_NAME, fatal, loadingDone, loadingLog } from './loading.js';
+import { APP_NAME, fatal, loadingDone, loadingLog, loadingStart } from './loading.js';
 import { Settings, resetSettingsIfAsked } from './settings.js';
 import { installStats } from './stats.js';
 
@@ -34,9 +34,6 @@ import { installStats } from './stats.js';
 // graph on this thread, so a pile of balls landing in the same frame must not
 // stall it. (The app already spaces its impact cues out; this is a backstop.)
 const MAX_IMPACTS_PER_FRAME = 4;
-// Reported as the button of a press the browser cancelled. No real button has
-// this number, so the app ends the press without taking it for a click.
-const NO_BUTTON = 0xffffffff;
 
 // KeyboardEvent.code → bridge key. Codes name physical keys, so W/A/S/D sit in
 // the same place on every keyboard layout.
@@ -92,7 +89,8 @@ const errorText = document.getElementById('error-text');
 const HUD_TEXT =
   `${APP_NAME}\n` +
   'W/A/S/D or arrows: roll · Space: jump · click: drop a ball\n' +
-  'right-drag: orbit · wheel: zoom · R: reset\n' +
+  'right-drag: orbit · wheel: zoom\n' +
+  'Enter: clear the dropped balls · R: reload the scene\n' +
   'touch: swipe to fling the ball · tap to drop\n' +
   'sound starts on your first key or click\n';
 
@@ -308,15 +306,23 @@ function main() {
       case 'gpu-info':
         settings.gpuInfo(msg);
         break;
+      // The scene is being loaded again (the app asked: R, or a hot swap).
+      // The same loading screen as at start-up, until the next `ready`.
+      case 'loading':
+        loadingStart();
+        // The roll keeps playing at its last speed until a ROLL cue says
+        // otherwise, and none comes until the new scene is up.
+        soundCue(CUE.ROLL, 0, rollX, rollZ);
+        lastCue = null;
+        setStatus('loading scene…');
+        break;
+      // The scene is on screen: after start-up, and after every reload.
       case 'ready':
         loadingLog('first frames rendered — ready');
         loadingDone();
         stats.markReady();
         settings.ready();
         setStatus('playing — roll · Space jump · click drops a ball · right-drag orbit');
-        break;
-      case 'attached':
-        console.info('[renderer] attached to the app');
         break;
       case 'aa-compile-start':
         settings.compileStart(msg);
@@ -536,7 +542,7 @@ function main() {
   // the pointer away (a touch that became a scroll, a system gesture). The app
   // is told either way, so it never waits for a release that will not come. A
   // cancelled event carries no usable button or position: it is reported with
-  // NO_BUTTON at the last place the pointer was seen.
+  // BUTTON_CANCELLED at the last place the pointer was seen.
   function endPress(event) {
     if (!drag || event.pointerId !== drag.id) return;
     const cancelled = event.type === 'pointercancel';
@@ -544,7 +550,7 @@ function main() {
     drag = null;
     app?.bridge?.setPointer(x, y, cancelled ? 0 : event.buttons);
     app?.bridge?.sendPointerUp(
-      cancelled ? NO_BUTTON : event.button,
+      cancelled ? BUTTON_CANCELLED : event.button,
       x,
       y,
       pointerKind(event),

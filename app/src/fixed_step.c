@@ -43,8 +43,5 @@ uint32_t fixed_step_advance(fixed_step *fs, app_state *app, double now_ms) {
         app_step(app, step_seconds);
         steps += 1;
     }
-    if (fs->accumulator_ms >= STEP_MS) {
-        fs->accumulator_ms = 0.0; // hit the cap: drop the backlog
-    }
     return steps;
 }

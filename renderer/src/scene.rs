@@ -25,7 +25,10 @@ use glam::{Mat4, Quat, Vec3};
 use crate::bridge::{bridge_hash, Collider, Shape};
 use crate::page;
 
-/// Everything about the loaded scene that the bridge talks about.
+/// Everything about the loaded scene that the bridge talks about. The default
+/// is an empty scene: what the renderer holds between wiping the old scene
+/// and loading it again.
+#[derive(Default)]
 pub struct SceneIndex {
     /// Every collider node of the scene, in world space.
     pub colliders: Vec<Collider>,

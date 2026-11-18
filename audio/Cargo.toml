@@ -60,10 +60,10 @@ features = [
     "RequestCache",
 ]
 
-# Optimize the dependencies even in a debug build. The player builds a WebAudio
-# graph on every impact, and at opt-level 0 that takes tens of milliseconds on
-# the main thread, which shows up as input lag. Nothing here builds a debug
-# variant today; this keeps one usable if you add it (`cargo build`).
+# `task audio:dev`, which `task dev` runs on every save. Our own crate stays
+# unoptimized so it rebuilds fast; the dependencies are optimized even here:
+# the player builds a WebAudio graph on every impact, and at opt-level 0 that
+# takes tens of milliseconds on the main thread, which shows up as input lag.
 [profile.dev.package."*"]
 opt-level = 3
 

@@ -168,9 +168,9 @@ static void test_click_drops_a_ball_and_reset_clears(void) {
     CHECK(f->outbox.cues_by_id[APP_CUE_CAMERA] == camera_cues + 1);
     CHECK(f->outbox.last_cue_value[APP_CUE_CAMERA] == f->app.camera.yaw);
 
-    // R: the dropped ball goes, the player's ball returns to the start.
-    headless_key(f->bridge, BRIDGE_KEY_R, true);
-    headless_key(f->bridge, BRIDGE_KEY_R, false);
+    // Enter: the dropped ball goes, the player's ball returns to the start.
+    headless_key(f->bridge, BRIDGE_KEY_ENTER, true);
+    headless_key(f->bridge, BRIDGE_KEY_ENTER, false);
     run(f, DT);
     CHECK(f->outbox.despawns == 1);
     CHECK(app_active_balls(&f->app) == 1);
@@ -288,6 +288,70 @@ static void test_scene_can_be_described_again(void) {
     CHECK(f->app.static_count == 5);
     CHECK(app_active_balls(&f->app) == 1);
     CHECK(f->outbox.binds == 2);
+    fixture_free(f);
+}
+
+static void test_r_reloads_the_scene(void) {
+    fixture *f = fixture_new();
+    headless_send_scene(f->bridge);
+    run(f, 1.0f);
+    headless_click(f->bridge, 0.25f, 0.0f);
+    headless_right_drag(f->bridge, 40.0f, 0.0f);
+    run(f, 1.0f);
+    CHECK(app_active_balls(&f->app) == 2);
+    float yaw_default = camera_default(vec3_make(0.0f, 0.0f, 0.0f)).yaw;
+    CHECK(f->app.camera.yaw != yaw_default);
+
+    // R: one RELOAD_SCENE goes out and the world is emptied at once.
+    headless_key(f->bridge, BRIDGE_KEY_R, true);
+    headless_key(f->bridge, BRIDGE_KEY_R, false);
+    run(f, 0.1f);
+    CHECK(f->outbox.reloads == 1);
+    CHECK(!f->app.scene.ready);
+    CHECK(app_active_balls(&f->app) == 0);
+    CHECK(f->app.static_count == 0);
+    CHECK(latest(f)->pose_count == 0); // nothing is posed meanwhile
+
+    // A second R before the scene is back does not ask twice, and clicks
+    // drop nothing into a world that is not there.
+    headless_key(f->bridge, BRIDGE_KEY_R, true);
+    headless_key(f->bridge, BRIDGE_KEY_R, false);
+    headless_click(f->bridge, 0.25f, 0.0f);
+    run(f, 0.1f);
+    CHECK(f->outbox.reloads == 1);
+    CHECK(f->outbox.spawns == 1);
+
+    // The renderer describes the fresh scene: everything starts over, as
+    // after the first load (the dropped ball is gone, the camera is back).
+    headless_send_scene(f->bridge);
+    run(f, 1.0f);
+    CHECK(f->app.scene.ready);
+    CHECK(f->app.static_count == 5);
+    CHECK(app_active_balls(&f->app) == 1);
+    CHECK(f->outbox.binds == 2);
+    CHECK(f->app.camera.yaw == yaw_default);
+    fixture_free(f);
+}
+
+static void test_hot_swap(void) {
+    // A new app instance attaches to a scene a previous instance has driven.
+    fixture *f = fixture_new();
+    headless_send_scene_as(f->bridge, true);
+    run(f, 0.1f);
+#if APP_RELOAD_SCENE_ON_HOT_SWAP
+    // It does not take the scene over; it asks for a clean one, once.
+    CHECK(!f->app.scene.ready);
+    CHECK(f->outbox.reloads == 1);
+    CHECK(f->outbox.binds == 0);
+    headless_send_scene(f->bridge);
+    run(f, 0.1f);
+    CHECK(f->outbox.reloads == 1);
+#else
+    CHECK(f->outbox.reloads == 0);
+#endif
+    CHECK(f->app.scene.ready);
+    CHECK(f->app.static_count == 5);
+    CHECK(f->outbox.binds == 1);
     fixture_free(f);
 }
 
@@ -467,6 +531,8 @@ int main(void) {
     test_touch_swipe_flings_and_tap_drops();
     test_ball_that_falls_off_is_put_back();
     test_scene_can_be_described_again();
+    test_r_reloads_the_scene();
+    test_hot_swap();
     test_click_on_sky_does_nothing();
     test_camera_ray_matches_projection();
     return check_report();

@@ -15,7 +15,7 @@
 //     { type: 'attach', memory, bridgePtr }                         →  attach(...)
 //     { type: 'detach' }                                            →  detach()
 //
-// Messages back to the page (`progress`, `gpu-info`, `ready`, `attached`,
+// Messages back to the page (`loading`, `progress`, `gpu-info`, `ready`,
 // `aa-compile-start`, `aa-compile-progress`, `aa-compile-done`, `error`) are
 // posted by the Rust code itself; the only one sent from here is `error`.
 

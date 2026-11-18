@@ -226,7 +226,9 @@ function watchStamps() {
       watcher = fs.watch(root, (_event, filename) => {
         const name = filename?.toString();
         if (name && name.endsWith('.stamp') && !name.includes('/') && !name.includes('\\')) {
-          stampChanged(name);
+          // A stamp being DELETED is a build starting (the Rust tasks remove
+          // their stamp first), not one finishing: wait for the new one.
+          if (fs.existsSync(path.join(root, name))) stampChanged(name);
         }
       });
       watcher.on('error', stop);

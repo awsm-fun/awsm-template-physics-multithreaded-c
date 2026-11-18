@@ -230,3 +230,13 @@ foreach(_name IN ITEMS bridge app)
     target_link_libraries(test_${_name} PRIVATE core project_options)
     add_test(NAME ${_name} COMMAND test_${_name})
 endforeach()
+
+# The cross-language layout check: bridge_layout prints what THIS compiler
+# makes of bridge.h, and the script compares the Rust and JS mirrors
+# (renderer/src/bridge.rs, dom/bridge.js) with it.
+add_executable(bridge_layout tests/bridge_layout.c)
+target_link_libraries(bridge_layout PRIVATE core project_options)
+find_program(NODE_EXECUTABLE node REQUIRED)
+add_test(NAME bridge_mirrors
+    COMMAND "${NODE_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../tools/check-bridge.mjs"
+            $<TARGET_FILE:bridge_layout>)
