@@ -45,8 +45,7 @@ export const HUD_CONTROLS =
   'W/A/S/D or arrows: roll · Space: jump · click: drop a ball\n' +
   'right-drag: orbit · wheel: zoom\n' +
   'Enter: clear the dropped balls · R: reload the scene\n' +
-  'touch: swipe to fling the ball · tap to drop\n' +
-  'sound starts on your first key or click';
+  'touch: swipe to fling the ball · tap to drop';
 
 // The HUD's status line once the scene is on screen.
 export const PLAYING_STATUS = 'playing — roll · Space jump · click drops a ball · right-drag orbit';
