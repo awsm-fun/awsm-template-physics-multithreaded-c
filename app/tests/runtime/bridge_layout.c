@@ -97,7 +97,9 @@ int main(void) {
     entry("renderer_phase", BRIDGE_TIMING_RENDERER_PHASE);
     entry("renderer_pass", BRIDGE_TIMING_RENDERER_PASS);
     entry("gpu_pass", BRIDGE_TIMING_GPU_PASS);
-    entry("renderer_overhead", BRIDGE_TIMING_RENDERER_OVERHEAD);
+    entry("renderer_prep", BRIDGE_TIMING_RENDERER_PREP);
+    entry("renderer_submit", BRIDGE_TIMING_RENDERER_SUBMIT);
+    entry("renderer_hook", BRIDGE_TIMING_RENDERER_HOOK);
     entry("physics_stage", BRIDGE_TIMING_PHYSICS_STAGE);
     entry("physics_solve", BRIDGE_TIMING_PHYSICS_SOLVE);
 

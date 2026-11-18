@@ -139,11 +139,12 @@ tasks:
       - task: app:test
 
   check:
-    desc: 'Everything CI runs: clean configure+build+test of the app (debug, release, wasm) and the renderer and audio checks'
+    desc: 'Everything CI runs: clean configure+build+test of the app (debug, release, wasm) the renderer and audio checks, and a syntax check of the page'
     cmds:
       - task: app:check
       - task: renderer:check
       - task: audio:check
+      - task: dom:check
 
   fmt:
     desc: Format the C and Rust sources

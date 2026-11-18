@@ -314,8 +314,14 @@ enum {
 // The capacity can grow freely (rule 1). BRIDGE_TIMING_APP_SLOTS is the one
 // number here the renderer has compiled in: changing it needs a renderer
 // rebuild, which the mirror check (tools/check-bridge.mjs) insists on.
+//
+// Capacity: the renderer claims an entry per name the first time it has a
+// number for it, and names it cannot fit are left out of the panel. With
+// every effect on it needs about 80 (4 phases, some 20 "prepare" and "submit"
+// scopes, up to 25 passes on the CPU and as many on the GPU, a hook each), so
+// 104 of its own leave room.
 
-#define BRIDGE_TIMING_CAPACITY 96u
+#define BRIDGE_TIMING_CAPACITY 128u
 #define BRIDGE_TIMING_APP_SLOTS 24u
 
 // bridge_timing.kind: what the entry measures, which is also where the page
@@ -324,16 +330,16 @@ enum {
     BRIDGE_TIMING_UNUSED = 0,
     BRIDGE_TIMING_APP_PHASE = 1,      // a part of the app's step            (per step)
     BRIDGE_TIMING_RENDERER_PHASE = 2, // a part of the renderer's frame      (per frame)
-    BRIDGE_TIMING_RENDERER_PASS = 3,  // CPU time inside one render pass     (per frame)
+    BRIDGE_TIMING_RENDERER_PASS = 3,  // CPU time encoding one render pass   (per frame)
     BRIDGE_TIMING_GPU_PASS = 4,       // GPU time of one render pass         (per frame)
-    // What timing the passes costs the renderer, averaged over every frame.
-    // The renderer's per-pass timers are far from free, so they run on some
-    // frames only: the PHASE entries come from the frames without them, the
-    // PASS entries from the frames with them (with the timers' own share
-    // taken out), and this is the difference. See renderer/src/profile.rs.
-    BRIDGE_TIMING_RENDERER_OVERHEAD = 5, //                                  (per frame)
-    BRIDGE_TIMING_PHYSICS_STAGE = 6,     // a stage of Box3D's step          (per step)
-    BRIDGE_TIMING_PHYSICS_SOLVE = 7,     // a part of its solve stage        (per step)
+    // 5 is retired (what the renderer's sampled timers cost) and not reused.
+    BRIDGE_TIMING_PHYSICS_STAGE = 6, // a stage of Box3D's step              (per step)
+    BRIDGE_TIMING_PHYSICS_SOLVE = 7, // a part of its solve stage            (per step)
+    // The rest of the renderer's render(), by what awsm-renderer says each of
+    // its scopes is (profiling::cpu_scope_kind):
+    BRIDGE_TIMING_RENDERER_PREP = 8,   // work before the first pass         (per frame)
+    BRIDGE_TIMING_RENDERER_SUBMIT = 9, // finishing and submitting the frame (per frame)
+    BRIDGE_TIMING_RENDERER_HOOK = 10,  // a render hook of the renderer's    (per frame)
 };
 
 typedef struct bridge_timing {

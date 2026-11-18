@@ -3,9 +3,17 @@
 // stats.js — the stats panel (top right) and the Stats button (bottom left)
 // that shows and hides it.
 //
-// One group per thread, so that every number sits under the thread that
-// spent it, and every number says its unit and what it is per:
+// A frame budget first, then one group per thread, so that every number sits
+// under the thread that spent it, and every number says its unit and what it
+// is per:
 //
+//   frame budget               the time one display refresh allows, how much
+//                              of it the GPU and each thread use per frame,
+//                              and the headroom the largest of them leaves.
+//                              CPU and GPU work run in parallel, so each must
+//                              fit the budget on its own; they do not add up,
+//                              except when the CPU waits on the GPU, which
+//                              shows as missed frames.
 //   display                    the display's refresh rate (measured here, from
 //                              this thread's own animation frames), the frames
 //                              the renderer presented per second, and the
@@ -15,7 +23,10 @@
 //                              rows are the passes; on GPUs that run passes
 //                              overlapped (Apple's) they add up to more than
 //                              the frame.
-//   renderer (render worker)   the render worker's CPU time per frame.
+//   renderer (render worker)   the render worker's CPU time per frame: the
+//                              phases of its frame, and inside render() what
+//                              awsm-renderer does to prepare, in each pass,
+//                              and to submit.
 //   app (C, app worker)        the app's own CPU time per fixed step (the
 //                              step without Box3D's part), its steps per
 //                              second, and the frames the renderer drew
@@ -73,6 +84,7 @@ const PAUSE_SLACK_MS = 250;
 // The groups, top to bottom. `detail`: the bit that asks the other threads to
 // measure this group's breakdown while it is expanded.
 const GROUPS = [
+  { id: 'budget', label: 'frame budget' },
   { id: 'display', label: 'display' },
   { id: 'gpu', label: 'GPU', detail: DETAIL.GPU },
   { id: 'renderer', label: 'renderer (render worker)', detail: DETAIL.RENDERER },
@@ -82,9 +94,19 @@ const GROUPS = [
   { id: 'page', label: 'page (main thread)' },
 ];
 
-// The renderer's phase whose time its per-pass rows are a breakdown of, and
-// the same for Box3D's stage and the parts of its solver.
+// The renderer's phase that awsm-renderer's own scopes are a breakdown of,
+// and the subgroups those scopes are shown in: by kind, with the prefix the
+// renderer gives a kind's names taken off.
 const RENDER_PHASE = 'render (encode + submit)';
+const SCOPE_GROUPS = [
+  { kind: TIMING.RENDERER_PREP, label: 'prepare', prefix: 'Prep: ' },
+  { kind: TIMING.RENDERER_PASS, label: 'passes', prefix: '' },
+  { kind: TIMING.RENDERER_SUBMIT, label: 'submit', prefix: 'Submit: ' },
+  { kind: TIMING.RENDERER_HOOK, label: 'hooks', prefix: '' },
+];
+// Scopes faster than this (ms) are folded into one "N more" line.
+const FOLD_UNDER_MS = 0.001;
+// Box3D's stage that the parts of its solver are a breakdown of.
 const SOLVE_STAGE = 'solve';
 
 // A duration with its unit: microseconds below a tenth of a millisecond.
@@ -97,6 +119,11 @@ function duration(ms) {
 }
 
 const smooth = (ema, value) => (ema == null ? value : ema + (value - ema) * EMA_ALPHA);
+
+// For the frame budget's rows: milliseconds to one decimal and a share of the
+// budget, neither of which may read as nothing when it is something.
+const tenths = (ms) => (ms > 0 && ms < 0.05 ? '<0.1' : ms.toFixed(1));
+const share = (ratio) => (ratio > 0 && ratio < 0.005 ? '<1%' : `${Math.round(ratio * 100)}%`);
 
 // Measures the display's refresh period from this thread's own animation
 // frames. This thread does little per frame, so it keeps up with the display
@@ -175,17 +202,19 @@ function buildGroups(panel) {
     panel.append(header, rows);
   }
 
-  // `rows`: [label, value] pairs; a third `true` indents a row one level
-  // (a breakdown of the row above), and a fourth marks it bad (red).
+  // `rows`: [label, value] pairs; a third entry indents a row by that many
+  // levels, 1 or 2 (a breakdown of the row above), and a fourth marks it bad
+  // (red).
   view.set = (id, headline, rows = [], bad = false) => {
     const part = parts.get(id);
     part.headline.textContent = headline;
     part.header.classList.toggle('stats-bad', bad);
     if (!part.open) return;
     part.rows.replaceChildren(
-      ...rows.map(([label, value, nested, rowBad]) => {
+      ...rows.map(([label, value, level, rowBad]) => {
         const row = document.createElement('div');
-        row.className = `stats-row${nested ? ' stats-nested' : ''}${rowBad ? ' stats-bad' : ''}`;
+        const nested = ['', ' stats-nested', ' stats-nested stats-nested-2'][Number(level ?? 0)];
+        row.className = `stats-row${nested}${rowBad ? ' stats-bad' : ''}`;
         const name = document.createElement('span');
         name.textContent = label;
         const figure = document.createElement('span');
@@ -231,6 +260,7 @@ export function installStats({ getBridge, getLastCue, gameRows }) {
   let frameWorkEma = null;
   let stepWorkEma = null; // the app's own part of a step
   let physicsEma = null; // Box3D's part
+  let appFrameEma = null; // the app worker's steps (both parts), per frame drawn
   let activePoses = 0;
   let gpuEma = null;
   let pageEma = null;
@@ -311,6 +341,34 @@ export function installStats({ getBridge, getLastCue, gameRows }) {
       ],
     ]);
 
+    // The frame budget: one lane for the GPU and one per thread, each with
+    // what it uses per frame. They run in parallel, so each must fit the
+    // budget on its own, and the headroom is what the largest leaves.
+    const lanes = [
+      ['GPU', gpuEma],
+      ['renderer (render worker)', frameWorkEma],
+      ['app worker (app + Box3D step)', appFrameEma],
+      ['page (main thread)', pageEma],
+    ].filter(([, ms]) => ms !== null);
+    if (periodMs === null || lanes.length === 0) {
+      view.set('budget', 'measuring…');
+    } else {
+      const budget = periodMs.toFixed(1);
+      const headroom = periodMs - Math.max(...lanes.map(([, ms]) => ms));
+      const rows = lanes.map(([label, ms]) => [
+        label,
+        `${tenths(ms)} / ${budget} ms (${share(ms / periodMs)})`,
+      ]);
+      if (gpuEma !== null && frameWorkEma !== null) {
+        rows.push([
+          'latency (renderer + GPU), reference only',
+          `${(frameWorkEma + gpuEma).toFixed(1)} ms`,
+        ]);
+      }
+      const left =
+        headroom < 0 ? `over by ${(-headroom).toFixed(1)} ms` : `headroom ${headroom.toFixed(1)} ms`;
+      view.set('budget', `${budget} ms (${hz}) · ${left}`, rows, headroom < 0);
+    }
     let gpu = '—';
     if (gpuEma !== null) gpu = `${duration(gpuEma)} / frame`;
     else if (gpuEmptyWindows >= 3) gpu = 'n/a';
@@ -320,28 +378,35 @@ export function installStats({ getBridge, getLastCue, gameRows }) {
       slowestFirst(timings(TIMING.GPU_PASS)).map((pass) => [pass.name, `${duration(pass.ms)} / frame`]),
     );
 
-    // The renderer's phases in the order they run, with its CPU time inside
-    // each pass listed under the phase that encodes them.
+    // The renderer's phases in the order they run. Under render(), what
+    // awsm-renderer's own scopes say it spends, in subgroups by kind, and
+    // what is left over: the glue between them.
     const rendererRows = [];
-    const passes = slowestFirst(timings(TIMING.RENDERER_PASS));
+    const perFrame = (ms) => `${duration(ms)} / frame`;
+    const total = (entries) => entries.reduce((sum, entry) => sum + entry.ms, 0);
     for (const phase of timings(TIMING.RENDERER_PHASE)) {
-      rendererRows.push([phase.name, `${duration(phase.ms)} / frame`]);
-      if (phase.name !== RENDER_PHASE || passes.length === 0) continue;
-      for (const pass of passes) rendererRows.push([pass.name, `${duration(pass.ms)} / frame`, true]);
-      // What render() spends that no pass accounts for: per-frame uploads,
-      // culling, bookkeeping.
-      const inPasses = passes.reduce((sum, pass) => sum + pass.ms, 0);
-      rendererRows.push([
-        'outside the passes',
-        `${duration(Math.max(phase.ms - inPasses, 0))} / frame`,
-        true,
-      ]);
-    }
-    // The renderer's per-pass timers are costly, so it runs them on some
-    // frames only and reports what they add to the average frame: the one
-    // part of the headline that is there because the group is open.
-    for (const overhead of timings(TIMING.RENDERER_OVERHEAD)) {
-      rendererRows.push([`${overhead.name} (only while open)`, `${duration(overhead.ms)} / frame`]);
+      rendererRows.push([phase.name, perFrame(phase.ms)]);
+      if (phase.name !== RENDER_PHASE) continue;
+      let inScopes = 0;
+      let subgroups = 0;
+      for (const { kind, label, prefix } of SCOPE_GROUPS) {
+        const scopes = slowestFirst(timings(kind));
+        if (scopes.length === 0) continue;
+        subgroups += 1;
+        inScopes += total(scopes);
+        rendererRows.push([label, perFrame(total(scopes)), 1]);
+        for (const scope of scopes.filter((scope) => scope.ms >= FOLD_UNDER_MS)) {
+          const name = scope.name.startsWith(prefix) ? scope.name.slice(prefix.length) : scope.name;
+          rendererRows.push([name, perFrame(scope.ms), 2]);
+        }
+        const small = scopes.filter((scope) => scope.ms < FOLD_UNDER_MS);
+        if (small.length > 0) {
+          rendererRows.push([`${small.length} more under 1 µs`, perFrame(total(small)), 2]);
+        }
+      }
+      if (subgroups > 0) {
+        rendererRows.push(['outside the scopes', perFrame(Math.max(phase.ms - inScopes, 0)), 1]);
+      }
     }
     view.set(
       'renderer',
@@ -388,6 +453,7 @@ export function installStats({ getBridge, getLastCue, gameRows }) {
       bridge = current;
       baseline = null;
       fpsEma = stepsEma = frameWorkEma = stepWorkEma = physicsEma = gpuEma = null;
+      appFrameEma = null;
       gpuEmptyWindows = 0;
       lateTotal = 0;
       lateWindows = 0;
@@ -449,12 +515,17 @@ export function installStats({ getBridge, getLastCue, gameRows }) {
     }
     // The step in two parts: Box3D's, and the rest, which is the app's own.
     // (An app from before the split reports no physics time: all is the app's.)
+    const stepWorkMs = ((stats.stepWorkUs - previous.stepWorkUs) >>> 0) / 1000;
     if (steps > 0) {
-      const stepMs = ((stats.stepWorkUs - previous.stepWorkUs) >>> 0) / steps / 1000;
+      const stepMs = stepWorkMs / steps;
       const physicsMs = ((stats.physicsStepUs - previous.physicsStepUs) >>> 0) / steps / 1000;
       stepWorkEma = smooth(stepWorkEma, Math.max(stepMs - physicsMs, 0));
       physicsEma = smooth(physicsEma, physicsMs);
     }
+    // The whole step per frame drawn (time per step × steps per frame): what
+    // the app worker uses of a frame's budget. Box3D's part is in it: the
+    // app worker runs the step, and its solver threads only help it.
+    if (frames > 0) appFrameEma = smooth(appFrameEma, stepWorkMs / frames);
     activePoses = stats.activePoses;
     if (page.frames > 0) pageEma = smooth(pageEma, page.ms / page.frames);
     // Average GPU ms per SAMPLED frame: the readback skips frames while one

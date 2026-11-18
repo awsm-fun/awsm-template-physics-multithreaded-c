@@ -97,24 +97,27 @@ touch devices and software GPUs start lower. Choices are remembered in
 keys share one prefix (`STORAGE_PREFIX` in `dom/game.js`): change it for
 your own project, since everything on the same origin shares `localStorage`.
 
-The Stats panel has one group per thread, so each number sits under the
-thread that spent it, with its unit and what it is per:
+The Stats panel opens with the frame budget and then has one group per
+thread, so each number sits under the thread that spent it, with its unit and
+what it is per:
 
 | Group | Headline | Expanded |
 | --- | --- | --- |
+| frame budget | the time one display refresh allows (16.7 ms at 60 Hz) and the headroom left by whichever of the GPU and the threads uses most of it | the GPU and each thread: time per frame, out of the budget (the app worker's is its whole step, Box3D's included, times the steps per frame); and, for reference, the latency of a frame (renderer + GPU) |
 | display | refresh rate and frames per second | missed frames (refreshes with no new frame: any steady count is visible stutter) |
 | GPU | GPU time per frame | per render pass (on Apple GPUs the passes overlap, so they add up to more than the frame) |
-| renderer (render worker) | the render worker's CPU time per frame | its phases (reading the app's state, camera, transforms, `render()`) and, under `render()`, the CPU time inside each pass and outside all of them |
+| renderer (render worker) | the render worker's CPU time per frame | its phases (reading the app's state, camera, transforms, `render()`) and, under `render()`, what awsm-renderer spends preparing the frame (uploads, bind groups, …), encoding each pass and submitting, with what is left over |
 | app (C, app worker) | the app's own CPU time per step, without Box3D's | steps per second, frames the app was late for (its steps did not finish within a frame), the phases of a step, dropped balls, the last impact cue |
 | physics (Box3D, N threads) | the time of Box3D's step, which the app worker runs together with the solver threads | Box3D's stages (pairs, collide, solve, sensors) and the parts of its solver |
 | page (main thread) | the main thread's work per frame | |
 
 A header toggles its group, and the choice is remembered. The breakdowns are
 only measured while their group is open (`renderer/src/profile.rs`, "Timing"
-in `app/src/runtime/runtime.c`), so a collapsed panel costs nothing extra. The renderer's
-per-pass CPU timers are expensive in a worker, so they run on one frame in
-sixteen, and what they add to the average frame is listed as "timing the
-passes".
+in `app/src/runtime/runtime.c`), so a collapsed panel costs nothing extra.
+
+CPU and GPU work run in parallel, so each must fit the frame budget on its
+own; they do not add up, except when the CPU waits on the GPU, which shows as
+missed frames.
 
 ## Quick start
 
@@ -328,7 +331,7 @@ Run `task` (or `task --list`) for this list.
 | `task build` | Release build of everything into a fresh `dist/`, deployable to any static host as it is (`COI=0` leaves out the header shim) |
 | `task serve` | Release build, then serve it (no watching) |
 | `task test` | Build and run the native app tests (debug, AddressSanitizer + UBSan), including the check that the Rust and JS mirrors of `bridge.h` match it |
-| `task check` | Everything CI runs: clean configure, build and test of the app (native debug, native release, wasm) and the renderer and audio checks |
+| `task check` | Everything CI runs: clean configure, build and test of the app (native debug, native release, wasm), the renderer and audio checks, and a syntax check of the page's JavaScript |
 | `task fmt` | Format the C and Rust sources |
 | `task clean` | Delete all build output (`dist/`, `app/build/`, the Rust `target/` directories) |
 | `task app:run` | Native headless run of the app, no browser. `task app:run -- 20` simulates 20 seconds. |
