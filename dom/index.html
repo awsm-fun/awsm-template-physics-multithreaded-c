@@ -6,24 +6,27 @@
     <title>Box3D physics in C · Rust renderer · JS page</title>
     <link rel="icon" href="data:," />
     <!-- coi-serviceworker (`task build` replaces this line with the shim's script tag) -->
-    <link rel="stylesheet" href="style.css" />
-    <script type="module" src="main.js"></script>
+    <link rel="stylesheet" href="runtime/style.css" />
+    <script type="module" src="runtime/main.js"></script>
   </head>
   <body>
-    <!-- tabindex: focusable, so pressing it takes the keyboard (see main.js). -->
+    <!-- The page shell, shared by your game and the runtime. Yours to retitle:
+         the <title>, the About text and the loading screen's title below. -->
+    <!-- tabindex: focusable, so pressing it takes the keyboard (see runtime/main.js). -->
     <canvas id="view" tabindex="-1"></canvas>
 
-    <!-- Everything drawn over the canvas. main.js fills in the text; the
-         behaviour lives in stats.js, about.js and settings.js. Hidden as a
-         whole when the page cannot start (loading.js, fatal()). -->
+    <!-- Everything drawn over the canvas. runtime/main.js fills in the HUD
+         (with your game's words from game.js); the behaviour lives in
+         runtime/stats.js, about.js and settings.js. Hidden as a whole when
+         the page cannot start (runtime/loading.js, fatal()). -->
     <div id="ui">
       <div class="hud" id="hud" aria-live="off"></div>
 
-      <!-- Top right, opt-in through the Stats button. stats.js fills it with
+      <!-- Top right, opt-in through the Stats button. runtime/stats.js fills it with
            one collapsible group per thread. -->
       <div class="stats" id="stats" hidden></div>
 
-      <!-- Outside the canvas, so pressing them never drops a ball. -->
+      <!-- Outside the canvas, so pressing them never reaches the game. -->
       <button class="stats-btn" id="stats-btn" type="button">Stats</button>
       <button class="about-btn" id="about-btn" type="button">About</button>
       <button class="settings-btn" id="settings-btn" type="button">Settings</button>
@@ -108,7 +111,7 @@
         </div>
       </div>
 
-      <!-- Shown when the touch-device defaults lowered the quality (settings.js). -->
+      <!-- Shown when the touch-device defaults lowered the quality (runtime/settings.js). -->
       <div class="settings-overlay" id="quality-notice" hidden>
         <div class="settings-modal">
           <button class="about-close" type="button" aria-label="Close" data-close>×</button>
@@ -136,7 +139,7 @@
     </div>
 
     <!-- In the static HTML so it shows the moment the page arrives, while the
-         workers are still downloading and compiling. loading.js appends the
+         workers are still downloading and compiling. runtime/loading.js appends the
          progress lines, fades it out when the first frames are up, and shows
          it again while the scene is reloaded. -->
     <div id="loading">

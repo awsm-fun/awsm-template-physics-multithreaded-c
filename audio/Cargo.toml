@@ -2,8 +2,8 @@
 # app's cues (rolling, impacts, camera heading) into live WebAudio changes.
 #
 # WebAudio exists only on the main thread, so unlike the renderer this module
-# is not a worker: dom/main.js imports it directly and calls the small `Audio`
-# class it exports (see src/lib.rs).
+# is not a worker: dom/runtime/main.js imports it directly, and dom/game.js
+# calls the small `Audio` class it exports (see src/lib.rs).
 #
 # This is a standalone crate, not a workspace member: it is built with plain
 # `cargo build` on stable Rust, then post-processed by the wasm-bindgen CLI

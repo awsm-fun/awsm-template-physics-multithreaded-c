@@ -22,12 +22,51 @@ page, a WebGPU renderer written in Rust, and an application written in C
 (which starts more threads of its own for physics). All
 application logic and state live in the C code, which is where you work day to
 day. The three threads talk through one block of shared memory, the **bridge
-block**, laid out by a single C header, `app/src/bridge.h`. Saving a C file
-rebuilds the app and swaps it into the running page in a couple of seconds. The
-page does not reload and the renderer keeps its loaded scene.
+block**, laid out by a single C header, `app/src/runtime/bridge.h`. Saving a
+C file rebuilds the app and swaps it into the running page in a couple of
+seconds. The page does not reload and the renderer keeps its loaded scene.
 
-The included demo is a table with a red ball on it, simulated by
-[Box3D](https://github.com/erincatto/box3d) (the real C engine, as a git
+## Where your game goes
+
+Every file is either **yours**, the part that changes when you make a new
+game from this template, or **the runtime**, which is the same for every game
+and runs yours. The C and JS files under `game/` and `runtime/` say which on
+their first line (`YOUR GAME: start here` or `RUNTIME: …`).
+
+```
+app/src/game/        YOURS    game.h, game.c: your game, in C. Start here.
+                              headless.c: your scene and input for native runs
+app/tests/game/      YOURS    test_game.c: tests for your game
+dom/game.js          YOURS    page side: name, storage prefix, keys, HUD, cues → sound
+dom/index.html       YOURS    page shell: title and About text
+media/bundle/        YOURS    the scene: scene.toml (+ assets/)
+media/audio/         YOURS    the sounds: an awsm-audio project
+
+app/src/runtime/     RUNTIME  step loop, Box3D world and pose slots, camera, bridge block, entry points
+app/tests/runtime/   RUNTIME  bridge, layout, fixed-step and camera tests, check.h
+app/web/             RUNTIME  the app worker's script
+app/vendored/box3d/  RUNTIME  Box3D itself (git submodule)
+dom/runtime/         RUNTIME  boot, workers, input, HUD, sound loading, panels, bridge view
+renderer/            RUNTIME  the Rust WebGPU renderer
+audio/               RUNTIME  the Rust sound player your cues call
+tools/, taskfile/    RUNTIME  dev server, checks, every workflow
+```
+
+To replace the ball demo with your own physics game, edit `app/src/game/`,
+`dom/game.js` and `media/` (and retitle `dom/index.html`); nothing in
+`renderer/`, `audio/`, `tools/` or `taskfile/` needs to change. The runtime
+calls your game through a few hooks in `game.c`, and your game acts only
+through `runtime_*` calls and Box3D's own `b3*` API on its bodies; it never
+touches the bridge block itself (see [Your game](#your-game)). A new `.c` file in
+`app/src/game/` or `test_*.c` in `app/tests/game/` is picked up by the build
+with no other edit. The only reason to open a runtime file is something the
+runtime does not have yet, such as a new key, a new kind of message between
+the threads, or a sound the player cannot make yet; the steps below say when.
+
+## The demo
+
+A table with a red ball on it, simulated by
+[Box3D](https://github.com/erincatto/box3d) (the real C library, as a git
 submodule, with its solver running on several threads):
 
 | Input | Effect |
@@ -55,7 +94,7 @@ anti-aliasing (Off, SMAA, 4× MSAA). The resolution starts at native, held to
 a budget of 2.8 million pixels (so a big high-DPI window starts below 100%);
 touch devices and software GPUs start lower. Choices are remembered in
 `localStorage` and always win; `?reset` in the URL forgets them. The storage
-keys share one prefix (`STORAGE_PREFIX` in `dom/settings.js`): change it for
+keys share one prefix (`STORAGE_PREFIX` in `dom/game.js`): change it for
 your own project, since everything on the same origin shares `localStorage`.
 
 The Stats panel has one group per thread, so each number sits under the
@@ -72,7 +111,7 @@ thread that spent it, with its unit and what it is per:
 
 A header toggles its group, and the choice is remembered. The breakdowns are
 only measured while their group is open (`renderer/src/profile.rs`, "Timing"
-in `app/src/app.c`), so a collapsed panel costs nothing extra. The renderer's
+in `app/src/runtime/runtime.c`), so a collapsed panel costs nothing extra. The renderer's
 per-pass CPU timers are expensive in a worker, so they run on one frame in
 sixteen, and what they add to the average frame is listed as "timing the
 passes".
@@ -135,7 +174,7 @@ setting up Linux; other browsers with WebGPU have not been tried.
             ▼                          ▼                           ▼
  ┌─────────────────────────────────────────────────────────────────────────────┐
  │ bridge block, inside the app module's shared WebAssembly.Memory             │
- │ (layout: app/src/bridge.h)                                                  │
+ │ (layout: app/src/runtime/bridge.h)                                          │
  │                                                                             │
  │  header     magic, version, step rate, frame_tick, frame time,              │
  │             latest_step, section table                                      │
@@ -163,19 +202,25 @@ renderer's progress back while it recompiles for one or loads the scene again
 
 ```
 app/                  the C app: a CMake project (CMakeLists.txt, CMakePresets.json)
-  src/app.c, app.h    the demo: all game state and logic
-  src/physics.c       the glue between the app and Box3D
+  src/game/           YOUR GAME
+    game.h            slots, cue ids, tuning, world settings, game_state, step rate
+    game.c            the demo: bodies, controls, drops, cues, camera behaviour
+    headless.c        the scene and a script of input, for native runs and tests
+  src/runtime/        RUNTIME
+    runtime.h, .c     the step loop, the hooks it calls and the runtime_* API
+    bridge.h          the contract between the three threads (start here)
+    bridge.c          the app's side of the bridge block
+    physics.c         Box3D world creation, its assert hook, collider → shape
+    camera.c          orbit camera, click-to-ray picking
+    fixed_step.c      turns wall-clock time into whole fixed steps
+    math3d.h          small vector / quaternion / matrix library
+    web_main.c        browser entry point (app_start, app_run)
+    main.c            native entry point: a headless run with no browser
+    headless.c        stand-ins for the page and renderer, for native runs and tests
+  tests/game/         YOUR GAME: test_game.c
+  tests/runtime/      RUNTIME: test_bridge.c, test_fixed_step.c, test_camera.c,
+                      check.h, and bridge_layout.c (prints the layout for the mirror check)
   vendored/box3d/     Box3D itself, unmodified (git submodule)
-  src/bridge.h        the contract between the three threads (start here)
-  src/bridge.c        the app's side of the bridge block
-  src/camera.c        orbit camera, click-to-ray picking
-  src/fixed_step.c    turns wall-clock time into whole 240 Hz steps
-  src/math3d.h        small vector / quaternion / matrix library
-  src/web_main.c      browser entry point (app_start, app_run)
-  src/main.c          native entry point: a headless run with no browser
-  src/headless.c      stand-ins for the page and renderer, for native runs and tests
-  tests/              native tests (test_app.c, test_bridge.c) and bridge_layout.c,
-                      which prints the layout for the mirror check
   web/worker.js       the worker script that loads app.js + app.wasm
 audio/                a second Rust crate: plays the sound, on the main thread
   src/lib.rs          the small API the page calls (load, start, roll, wallHit, …)
@@ -187,7 +232,10 @@ renderer/             the Rust crate (cdylib), built with cargo + wasm-bindgen +
   src/slots.rs        what each pose slot drives (bind / spawn / despawn)
   web/worker.js       the worker script that loads the wasm-bindgen output
   vendored/           Basis Universal transcoder and its worker (decodes the KTX2 textures)
-dom/                  the page: index.html, main.js, bridge.js (mirror of bridge.h), style.css,
+dom/                  the page
+  index.html          the page shell (YOURS: title and About text)
+  game.js             YOUR GAME: name, keys, HUD words, what each cue sounds like
+  runtime/            RUNTIME: main.js, bridge.js (mirror of bridge.h), style.css,
                       and the panels: settings.js, stats.js, about.js, loading.js, modal.js
 media/bundle/         the scene: scene.toml + assets/ (KTX2 textures)
 media/audio/          the sounds: an awsm-audio export (project.toml + assets/)
@@ -220,10 +268,10 @@ features that Rust wasm threads require.
 camera. The renderer is a view: it draws whatever the app last published and
 holds no application state of its own. Because the app owns the camera, it can
 turn a click into a ray through the scene and get the same answer the picture
-shows (`camera_ray` in `app/src/camera.c`).
+shows (`camera_ray` in `app/src/runtime/camera.c`).
 
 **Why the app worker never receives messages.** The app's loop (`app_run` in
-`app/src/web_main.c`) never returns: it sleeps on a shared word until the
+`app/src/runtime/web_main.c`) never returns: it sleeps on a shared word until the
 renderer starts a frame, runs as many fixed steps as the time since the
 previous frame pays for, and sleeps again. A worker that never returns to its event loop cannot
 receive `postMessage`, so everything that goes into the app goes through the
@@ -238,15 +286,16 @@ disjoint and contain no build output), so a C save never runs cargo:
 
 | You edit | What happens |
 | --- | --- |
-| `app/src`, `app/web`, `app/cmake`, `app/CMakeLists.txt` | the app is rebuilt (`task app:dev`) and only the app worker is swapped. No page reload. |
+| `app/src` (your `app/src/game/` included), `app/web`, `app/cmake`, `app/CMakeLists.txt` | the app is rebuilt (`task app:dev`) and only the app worker is swapped. No page reload. |
 | `renderer/src`, `renderer/web`, `renderer/Cargo.toml` | `task renderer:dev` (this crate unoptimized, dependencies optimized, no wasm-opt: a few seconds), then the page reloads |
 | `audio/src`, `audio/Cargo.toml` | `task audio:dev`, then the page reloads |
-| `dom/` | the files are copied to `dist/` and the page reloads |
+| `dom/` (your `dom/game.js` included) | the files are copied to `dist/` and the page reloads |
 | `media/`, `renderer/vendored/` | `task media:build` (a copy), then the page reloads |
 
-A hot-swapped app starts from a fresh state: `app_init` runs again and the
-renderer describes the scene to the new app. With
-`APP_RELOAD_SCENE_ON_HOT_SWAP` at `1` (the default, in `app/src/app.h`) the
+A hot-swapped app starts from a fresh state: `runtime_init` (and with it
+`game_init`) runs again and the renderer describes the scene to the new app.
+With `GAME_RELOAD_SCENE_ON_HOT_SWAP` at `1` (the default, in
+`app/src/game/game.h`) the
 new app also asks the renderer to load the scene again, so every save starts
 from the bundle whatever the previous build did to the world; the loading
 screen shows while that takes. At `0` it takes over the renderer's current
@@ -307,85 +356,124 @@ All C build configuration lives in `app/CMakeLists.txt` and
 `app/` does the same thing. The presets are `debug`, `release`, `wasm` and
 `wasm-dev`.
 
-## Where to put your code
+## Your game
 
-### Game logic: `app/src/app.c`
+Your C is `app/src/game/`: `game.h` holds what the runtime needs to know at
+compile time (the pose slots `GAME_*_SLOT` and `GAME_SLOT_COUNT`, the cue ids
+`GAME_CUE_*`, your `game_state`, tuning, the world settings `GAME_GRAVITY`,
+`GAME_HIT_MIN_SPEED` and `GAME_SOLVER_SUB_STEPS`, `APP_STEP_HZ` and
+`GAME_RELOAD_SCENE_ON_HOT_SWAP`), and `game.c` the logic. `headless.c` there
+describes your scene and scripts some input for the native runs and tests.
 
-`app_step()` runs once per fixed step (`APP_STEP_HZ`, 240 per second) and does
-four things in order:
+Each fixed step (`APP_STEP_HZ`, 240 per second) the runtime
+(`app/src/runtime/runtime.c`) reads the scene description and the input
+(in the browser, one page frame's worth, in the first step of each frame's
+burst; see "Frame pacing" below), lets your game act, steps the Box3D world,
+copies the poses out, and publishes a snapshot. The contract is declared in
+`app/src/runtime/runtime.h`. `game.c` provides:
 
-1. `read_scene()`: what the renderer says about the loaded scene;
-2. `read_user_input()`: key, pointer and wheel events from the page (in
-   the browser, one page frame's worth, in the first step of each frame's
-   burst; see "Frame pacing" below);
-3. `simulate()`: move the world. This is marked "Your game logic goes here";
-4. `publish_snapshot()`: write the camera and one pose per slot for the
-   renderer.
+| Hook | Called |
+| --- | --- |
+| `game_init(runtime, game)` | once, when the app starts (after every hot swap too): set up the camera |
+| `game_scene_begin(runtime, game)` | a scene description begins (first load, every reload, a hot swap): the runtime has destroyed every body; reset your state |
+| `game_scene_ready(runtime, game)` | the scene's colliders are in: build your world from them |
+| `game_key(runtime, game, key, down)` | a key went down or up, while the scene is ready: one-off actions |
+| `game_pointer(runtime, game, pointer)` | a pointer press, move, release or wheel turn, whether or not the scene is ready |
+| `game_update(runtime, game, dt)` | every fixed step while the scene is ready, before the world steps: your game loop |
+| `game_contact(runtime, game, a, b, touching)` | after the world step: two shapes started or stopped touching (shapes with `enableContactEvents`) |
+| `game_hit(runtime, game, a, b, speed, where)` | after the world step: two shapes hit faster than `GAME_HIT_MIN_SPEED` (shapes with `enableHitEvents`) |
+| `game_after_physics(runtime, game)` | the end of the step: every pose is up to date; read results, send cues |
 
-All state lives in `app_state` (`app/src/app.h`). Read held keys with
-`app_key_held()`, and handle one-off events in `apply_input()`. To make
-something appear, move or disappear on screen, use `send_command()` with
-`BRIDGE_CMD_BIND`, `BRIDGE_CMD_SPAWN` or `BRIDGE_CMD_DESPAWN`, then publish a
-pose for that slot every step. Set the pose's `BRIDGE_POSE_TELEPORT` flag when
-an object jumps (the demo does this through `app_ball.teleported`), so
-the renderer does not slide it across the world. Send sounds and UI events to
-the page with `send_cue()`.
+and calls back only these, plus Box3D's own `b3*` API on its bodies:
 
-To start over, call `app_reload_scene()` (R in the demo): the renderer
-destroys everything, loads the scene bundle again on the same GPU device and
-page, and describes the fresh scene exactly as after the first load. The app
-empties its Box3D world at once and rebuilds it when that description
-arrives; reset your own game state in `scene_begin()`.
+| Call | Does |
+| --- | --- |
+| `runtime_collider_count(runtime)`, `runtime_get_collider(runtime, i)` | the scene's colliders: name and top-level hashes, shape, dimensions, pose |
+| `runtime_scene_ready(runtime)` | whether the scene is described and the game is running |
+| `runtime_reload_scene(runtime)` | the renderer destroys everything and loads the bundle again, keeping the GPU device and the page (R in the demo); every body goes at once and the game restarts from `game_scene_begin` |
+| `runtime_current_step(runtime)` | the step being run, counting from 1 |
+| `runtime_key_held(runtime, BRIDGE_KEY_W)` | whether a key counts as held this step (a tap shorter than a step counts once) |
+| `runtime_pointer_ray(runtime, ndc_x, ndc_y)` | the ray under a point on the canvas, as the picture shows it |
+| `runtime_get_camera(runtime)` | the orbit camera the renderer draws from (`app/src/runtime/camera.h`); change it at any time |
+| `runtime_world(runtime)` | the Box3D world, to create bodies in |
+| `runtime_create_collider_body(runtime, collider, &shape_def)` | a static body for a scene collider, destroyed with the scene |
+| `runtime_bind_body(runtime, slot, body, node, variant)` | slot `slot` follows `body` and is drawn as scene node `node` itself, with a material variant or `nullptr` |
+| `runtime_spawn_body(runtime, slot, body, node, variant)` | the same, drawn as a new copy of `node` |
+| `runtime_destroy_body(runtime, slot)` | destroys the slot's body and takes it off screen |
+| `runtime_get_body(runtime, slot)` | the slot's body and its pose as of the last world step |
+| `runtime_teleport_body(runtime, slot, position, rotation)` | moves a body at once, at rest, without the renderer gliding it there |
+| `runtime_active_bodies(runtime)` | how many slots have a body |
+| `runtime_send_cue(runtime, GAME_CUE_ROLL, value, where)` | tells the page something happened (a sound, a UI change) |
+| `runtime_send_cue_throttled(runtime, cue, value, where, min_gap_s)` | the same, unless that cue went out less than `min_gap_s` ago |
 
-Express rates per second and multiply by `dt`. Then `APP_STEP_HZ` changes the
-step size, not the speed of the game.
+**Bodies and poses.** Create bodies in `runtime_world()` with `b3CreateBody`
+and the shape functions (the material, damping and events are your choice),
+then hand each one to be drawn to `runtime_bind_body()` or
+`runtime_spawn_body()`. After every world step the runtime copies each slot's
+pose out of Box3D and writes it into the snapshot; a new or teleported body is
+marked so the renderer does not slide it across the world. The game never
+sees a ring or a snapshot, and the runtime never needs to know what a body
+means. Express rates per second and multiply by `dt`; then `APP_STEP_HZ`
+changes the step size, not the speed of the game.
+
+**The page side** is `dom/game.js`: `GAME_NAME`, `STORAGE_PREFIX`,
+`KEY_CODES` (which keys reach the game), `HUD_CONTROLS`, `PLAYING_STATUS`,
+`onGameCue(record, page)` (called for every `runtime_send_cue`, with the id
+in `record.u(0)`, the value in `record.f(1)` and the position in
+`record.f(2..4)`), `onSoundLoaded(audio)`, `onSceneGone(page)` and
+`gameStatsRows(activePoses)`. Its `CUE` table must match `GAME_CUE_*` in
+`game.h`.
 
 ### Physics: Box3D
 
 The demo's physics is [Box3D](https://github.com/erincatto/box3d), Erin
-Catto's 3D engine, in C. It is the upstream repository, unmodified, as a git
-submodule in `app/vendored/box3d`, built by its own CMake project into a
-static library that the app links (`add_subdirectory` in `app/CMakeLists.txt`).
-Nothing of Box3D is copied into this repository.
+Catto's 3D physics library, in C. It is the upstream repository, unmodified,
+as a git submodule in `app/vendored/box3d`, built by its own CMake project
+into a static library that the app links (`add_subdirectory` in
+`app/CMakeLists.txt`). Nothing of Box3D is copied into this repository.
 
 * **Getting it.** `task setup` fetches the submodule. By hand:
   `git submodule update --init`, or clone with `--recurse-submodules`.
 * **Updating it.** Check out the commit you want inside `app/vendored/box3d`
   and commit the changed submodule pointer. The next build recompiles it.
-* **Using it.** `app.c` calls the `b3*` API directly: `scene_ready()` turns
-  the colliders the renderer reported into static bodies, `create_ball()`
-  makes the dynamic spheres, `simulate()` calls `b3World_Step`, and
-  `read_contact_events()` turns Box3D's touch and hit events into sound cues.
-  `physics.c` holds the few pieces that are not specific to the demo (world
-  creation, the assert hook, collider record → Box3D shape).
+* **Who does what.** The runtime owns the world: it creates it
+  (`app/src/runtime/physics.c`, which also routes Box3D's asserts and logs to
+  the console and turns a collider record into a Box3D shape), steps it,
+  copies the poses out and hands the game Box3D's touch and hit events. Your
+  game calls the `b3*` API directly for everything that is its decision:
+  `game_scene_ready()` turns the colliders into static bodies with the table's
+  materials, `create_ball()` makes the dynamic spheres, `steer_player()` and
+  `jump()` push the player's ball, and `game_contact()` / `game_hit()` turn
+  the events into sound cues.
 * **Speed.** Box3D is always compiled optimized, even in the debug presets
   (its asserts stay on there), and on wasm with SIMD. It is compiled once, so
   it does not slow down the save-to-running loop.
 * **Threads.** In the browser the solver runs on the app thread plus up to
   four more, depending on the machine's cores (`solver_thread_count()` in
-  `app/src/web_main.c`). These are Emscripten pthreads: web workers that share
-  the app's memory. They are created while the module loads
+  `app/src/runtime/web_main.c`). These are Emscripten pthreads: web workers
+  that share the app's memory. They are created while the module loads
   (`-sPTHREAD_POOL_SIZE` in `app/CMakeLists.txt`), because the app thread
   never returns to its event loop afterwards and could not start one. For the
-  same reason the app keeps one Box3D world for its whole life and replaces
-  the bodies in it, rather than recreating the world. Native runs and tests
-  use one thread.
+  same reason the runtime keeps one Box3D world for the app's whole life and
+  replaces the bodies in it, rather than recreating the world. Native runs and
+  tests use one thread.
 
 The app's memory has a fixed size of 64 MB (`-sINITIAL_MEMORY` in
 `app/CMakeLists.txt`), because the other threads hold views of it and growing
 it would replace the buffer under them. Raise it there if you need more.
 
 Native builds run the same code without a browser. `task app:run` drives it
-with a short script of input, and `app/tests/test_app.c` shows how to test game
-logic through the bridge, using the stand-ins in `app/src/headless.h`
-(`headless_send_scene`, `headless_key`, `headless_click`, `headless_swipe`,
-`headless_drain`).
+with the script of input in `game_headless_input()`
+(`app/src/game/headless.c`), and `app/tests/game/test_game.c` shows how to
+test game logic through the bridge, using the stand-ins in
+`app/src/runtime/headless.h` (`headless_key`, `headless_click`,
+`headless_swipe`, `headless_drain`, …) and your `game_headless_scene()`.
 
-### Sound: cues, `dom/main.js` and `audio/`
+### Sound: cues, `dom/game.js` and `audio/`
 
-The app never plays anything. It sends **cues** to the page (`send_cue()`),
-and the page turns them into sound. The demo's cues (`APP_CUE_*` in
-`app/src/app.h`):
+The app never plays anything. Your game sends **cues** to the page
+(`runtime_send_cue()`), and `onGameCue()` in `dom/game.js` turns them into
+sound. The demo's cues (`GAME_CUE_*` in `app/src/game/game.h`):
 
 | Cue | Sent when | Becomes |
 | --- | --- | --- |
@@ -396,101 +484,141 @@ and the page turns them into sound. The demo's cues (`APP_CUE_*` in
 WebAudio only exists on the main thread, so the player is a module the page
 imports: `audio/`, a small Rust crate built like the renderer (cargo,
 wasm-bindgen, wasm-opt) around
-[awsm-audio-player](https://crates.io/crates/awsm-audio-player). It plays the
-awsm-audio project in `media/audio/`, which `task media:build` copies to
-`dist/audio-project/`. If the module or the project fails to load, the HUD
-says `sound: off` and everything else carries on.
+[awsm-audio-player](https://crates.io/crates/awsm-audio-player). The runtime
+(`dom/runtime/main.js`) loads it and starts it on the first key or pointer
+press; your `dom/game.js` calls its voices. It plays the awsm-audio project in
+`media/audio/`, which `task media:build` copies to `dist/audio-project/`. If
+the module or the project fails to load, the HUD says `sound: off` and
+everything else carries on.
 
 To change how things sound, edit the project in the awsm-audio editor and
 export it over `media/audio/`. Keep the sample names and node labels
 (`roll_LEVEL`, `hit_FILTER`, `land_PANNER`, `clack_LEVEL`, …):
 `audio/src/sound.rs` finds the controls it drives by them.
 
+### Example: add a body
+
+A second ball, "Buddy", that starts beside the player's and stays when Enter
+clears the dropped ones. Only your files change.
+
+`app/src/game/game.h`, give it a slot and move the dropped balls up one:
+
+```c
+    GAME_PLAYER_SLOT = 0,
+    GAME_BUDDY_SLOT = 1,
+    GAME_FIRST_DROP_SLOT = 2,
+```
+
+`app/src/game/game.c`, at the end of `game_scene_ready()`, before the
+`printf`: create its body and draw it as a copy of the ball, in its original
+material:
+
+```c
+    vec3 buddy = vec3_add(s->ball_start, vec3_make(1.5f, DROP_HEIGHT, 0.0f));
+    runtime_spawn_body(runtime, GAME_BUDDY_SLOT,
+                       create_ball(runtime, game, GAME_BUDDY_SLOT, buddy), BALL_NODE, nullptr);
+```
+
+It drops in, rolls, clacks against the other balls and is put back if it falls
+off the table, like any other ball: those rules already cover every slot. No
+Rust is rebuilt. (The tests count what the game sends: with Buddy,
+`app/tests/game/test_game.c` sees one more SPAWN, one more active body and
+one more pose in every snapshot, so update the counts there.)
+
 ### Example: add a sound cue
 
-Cue ids belong to the app; the page decides what each one sounds like. To make
-the jump audible, reusing the landing thud:
+Cue ids belong to the game; `dom/game.js` decides what each one sounds like.
+To make the jump audible, reusing the landing thud:
 
-`app/src/app.h`, add an id:
-
-```c
-    APP_CUE_CAMERA = 5, // the camera turned
-    APP_CUE_JUMP = 6,   // the player's ball jumped
-```
-
-`app/src/app.c`, send it from `jump()`, with an intensity from 0 to 1 and a
-position:
+`app/src/game/game.h`, add an id:
 
 ```c
-    send_cue(app, APP_CUE_JUMP, 0.5f, player(app)->position);
+    GAME_CUE_CAMERA = 5, // the camera turned
+    GAME_CUE_JUMP = 6,   // the player's ball jumped
 ```
 
-`dom/main.js`, add the id to `CUE` and `CUE_NAMES`, and a case in
-`soundCue()`:
+`app/src/game/game.c`, send it from `jump()`, with an intensity from 0 to 1
+and a position:
+
+```c
+    runtime_send_cue(runtime, GAME_CUE_JUMP, 0.5f,
+                     runtime_get_body(runtime, GAME_PLAYER_SLOT)->position);
+```
+
+`dom/game.js`, add `JUMP: 6` to `CUE` and `[CUE.JUMP]: 'jump'` to
+`CUE_NAMES`, and a case in `soundCue()`:
 
 ```js
-    case CUE.JUMP:
-      audio.land(x, z, value);
-      break;
+      case CUE.JUMP:
+        audio.land(x, z, value);
+        break;
 ```
 
 Without that case the cue is silent, but still shows in the stats panel (as
-`cue 6` if it has no name). Neither Rust module needs rebuilding. A cue that needs a
-sound of its own also needs that sound in the awsm-audio project and a method
-for it in `audio/src/lib.rs`, followed by `task audio:release`.
+`cue 6` if it has no name). Neither Rust module needs rebuilding. A cue that
+needs a sound of its own also needs that sound in the awsm-audio project and a
+method for it in `audio/src/lib.rs` (a runtime file: the player only has the
+demo's voices so far), followed by `task audio:release`.
 
 ### Example: use a key
 
-The page reports a fixed set of keys (`BRIDGE_KEY_*` in `app/src/bridge.h`);
-what a key does is decided in the app. Each key arrives as a `BRIDGE_EV_KEY`
-event when it goes down or up, and `app_key_held()` answers whether it is held
-in the current step, worked out from those events in order. A tap shorter than
-a frame still counts as held for one step.
+The page reports a fixed set of keys (`BRIDGE_KEY_*` in
+`app/src/runtime/bridge.h`); what a key does is decided in the game. Each key
+arrives as a `game_key()` call when it goes down or up, and
+`runtime_key_held()` answers whether it is held in the current step, worked
+out from those events in order. A tap shorter than a frame still counts as
+held for one step.
 
 Shift is already reported but unused. To make it a "boost", use the held state
-in `steer_player()`:
+in `steer_player()` in `app/src/game/game.c`:
 
 ```c
-float accel = app_key_held(app, BRIDGE_KEY_SHIFT) ? 2.0f * MOVE_ACCEL : MOVE_ACCEL;
-vec3 push = vec3_scale(vec3_normalize(view_to_ground(app, x, z)), accel * dt * app->ball_mass);
+    float accel = runtime_key_held(runtime, BRIDGE_KEY_SHIFT) ? 2.0f * MOVE_ACCEL : MOVE_ACCEL;
+    vec3 push = vec3_scale(vec3_normalize(view_to_ground(runtime, x, z)),
+                           accel * dt * game->ball_mass);
 ```
 
-To add a key the page does not report yet, for example F:
+To add a key the page does not report yet, for example F, three runtime files
+change (the key set is part of the bridge) and then yours:
 
-1. `app/src/bridge.h`: add `BRIDGE_KEY_F = 14,` after `BRIDGE_KEY_R` (there is
-   room up to `BRIDGE_KEY_COUNT`, 64).
-2. `dom/bridge.js`: add `F: 14,` to `LAYOUT.key`, and
-   `app/tests/bridge_layout.c`: add `entry("f", BRIDGE_KEY_F);` (the mirror
-   check only accepts names that file prints).
-3. `dom/main.js`: add `KeyF: KEY.F,` to `KEY_CODES` (the keys are
+1. runtime: `app/src/runtime/bridge.h`: add `BRIDGE_KEY_F = 14,` after
+   `BRIDGE_KEY_R` (there is room up to `BRIDGE_KEY_COUNT`, 64);
+   `dom/runtime/bridge.js`: add `F: 14,` to `LAYOUT.key`; and
+   `app/tests/runtime/bridge_layout.c`: add `entry("f", BRIDGE_KEY_F);` (the
+   mirror check only accepts names that file prints).
+2. yours: `dom/game.js`: add `KeyF: KEY.F,` to `KEY_CODES` (the keys are
    `KeyboardEvent.code` values, so the physical key is the same on every
    layout).
-4. `app/src/app.c`: react to it in `key_event()`, next to the
+3. yours: `app/src/game/game.c`: react to it in `game_key()`, next to the
    `BRIDGE_KEY_SPACE` and `BRIDGE_KEY_R` cases, or poll it with
-   `app_key_held()`.
+   `runtime_key_held()`.
 
 This is an additive change, so `BRIDGE_VERSION` stays the same and the renderer
 is not rebuilt.
 
 ### Example: add a record type
 
+This changes how the threads talk, so it is runtime work, not game work. To
+send the page something new without it, use a new `GAME_CUE_*` id instead
+(above): that stays in `game.h`, `game.c` and `dom/game.js`.
+
 Discrete events travel as 64-byte `bridge_record`s: a `type`, the app `step`,
 and 14 payload words readable as `u[i]` (unsigned) or `f[i]` (float). The
 existing types are grouped by direction (1–6 page to app, 16–18 renderer to
 app, 32–35 app to renderer, 48 app to page). Add a new type to the enum in
-`app/src/bridge.h`, next to its group, and document its payload there; add it
-to `app/tests/bridge_layout.c` and to the mirror that uses it. Every consumer
-skips types it does not know.
+`app/src/runtime/bridge.h`, next to its group, and document its payload there;
+add it to `app/tests/runtime/bridge_layout.c` and to the mirror that uses it.
+Every consumer skips types it does not know.
 
 Whether the renderer needs rebuilding depends only on whether it has to
 understand the new record:
 
 | Direction | Producer | Consumer | Renderer rebuild? |
 | --- | --- | --- | --- |
-| page → app | a new `send…` method on `Bridge` in `dom/bridge.js` (built on its private `#push`) | `read_user_input()` in `app.c` | no |
-| app → page | `bridge_ring_push()` on `BRIDGE_RING_APP_TO_DOM` | the `bridge.drain()` callback in `dom/main.js` (add the type to `LAYOUT.record_type` in `dom/bridge.js`) | no |
-| app → renderer | `bridge_ring_push()` on `BRIDGE_RING_APP_TO_RENDERER` | `renderer/src/bridge.rs`, `render.rs`, `slots.rs` | yes |
-| renderer → app | `renderer/src/bridge.rs` and `render.rs` | `read_scene()` in `app.c` | yes |
+| page → app | a new `send…` method on `Bridge` in `dom/runtime/bridge.js` (built on its private `#push`) | `apply_input()` in `app/src/runtime/runtime.c`, then a hook or `runtime_*` call for your game | no |
+| app → page | a new `runtime_*` function in `runtime.c` (`bridge_ring_push()` on `BRIDGE_RING_APP_TO_DOM`) | the `bridge.drain()` callback in `dom/runtime/main.js` (add the type to `LAYOUT.record_type` in `dom/runtime/bridge.js`) | no |
+| app → renderer | `bridge_ring_push()` on `BRIDGE_RING_APP_TO_RENDERER` in `runtime.c` | `renderer/src/bridge.rs`, `render.rs`, `slots.rs` | yes |
+| renderer → app | `renderer/src/bridge.rs` and `render.rs` | `read_scene()` in `runtime.c` | yes |
 
 A renderer that predates a new app-to-renderer type logs a warning once and
 skips those records, so the page keeps working while you rebuild.
@@ -499,33 +627,42 @@ For example, an app-to-page record that reports a score (the names here are
 new ones you would add):
 
 ```c
-// app/src/bridge.h, in the record enum, after BRIDGE_CUE:
+// app/src/runtime/bridge.h, in the record enum, after BRIDGE_CUE:
     // The score changed.          u[0] = new score
     BRIDGE_UI_SCORE = 49,
 
-// app/src/app.c:
-bridge_record rec = {.type = BRIDGE_UI_SCORE, .step = app->step};
-rec.u[0] = score;
-(void)bridge_ring_push(bridge_get_ring(app->bridge, BRIDGE_RING_APP_TO_DOM), &rec);
+// app/src/runtime/runtime.h, with the other cue functions:
+void runtime_send_score(runtime_state *runtime, uint32_t score);
+
+// app/src/runtime/runtime.c:
+void runtime_send_score(runtime_state *runtime, uint32_t score) {
+    bridge_record rec = {.type = BRIDGE_UI_SCORE, .step = runtime->step};
+    rec.u[0] = score;
+    (void)bridge_ring_push(bridge_get_ring(runtime->bridge, BRIDGE_RING_APP_TO_DOM), &rec);
+}
+
+// app/src/game/game.c, wherever the score changes, e.g. at the end of
+// drop_ball_at(): one point per ball in play.
+    runtime_send_score(runtime, (uint32_t)runtime_active_bodies(runtime) - 1u);
 ```
 
 ```js
-// dom/bridge.js, in LAYOUT.record_type (and entry("ui_score", BRIDGE_UI_SCORE)
-// in app/tests/bridge_layout.c):
-  UI_SCORE: 49,
+// dom/runtime/bridge.js, in LAYOUT.record_type (and
+// entry("ui_score", BRIDGE_UI_SCORE) in app/tests/runtime/bridge_layout.c):
+    UI_SCORE: 49,
 
-// dom/main.js, at the top of the bridge.drain() callback in frame():
-if (record.type === RECORD.UI_SCORE) {
-  hudScore = record.u(0);
-  return;
-}
+// dom/runtime/main.js, at the top of the bridge.drain() callback in frame():
+        if (record.type === RECORD.UI_SCORE) {
+          setStatus(`score: ${record.u(0)}`);
+          return;
+        }
 ```
 
 ### What needs a renderer rebuild
 
 | Change | Rebuild the renderer? |
 | --- | --- |
-| anything in `app.c` / `app.h`, including `APP_STEP_HZ` | no |
+| anything in `app/src/game/`, including `APP_STEP_HZ` | no |
 | new keys, new cue ids, new page↔app record types | no |
 | `BRIDGE_SNAPSHOT_COUNT`, `BRIDGE_POSE_CAPACITY`, `BRIDGE_RING_CAPACITY` (powers of two where the header says so) | no; the renderer reads them from the section table |
 | new or larger sections, new fields in place of `reserved` words or at the end of a struct | no (rule 1 in `bridge.h`) |
@@ -535,11 +672,12 @@ if (record.type === RECORD.UI_SCORE) {
 
 ## The bridge in more depth
 
-`app/src/bridge.h` is the source of truth. It documents every field, every
-record payload and the rules below; `renderer/src/bridge.rs` and
-`dom/bridge.js` mirror it, and are the only files in their halves of the
-project that know byte offsets. The mirrors cannot drift silently:
-`app/tests/bridge_layout.c` prints the layout as the C compiler sees it, and
+`app/src/runtime/bridge.h` is the source of truth. It documents every field,
+every record payload and the rules below; `renderer/src/bridge.rs` and
+`dom/runtime/bridge.js` mirror it, and are the only files in their halves of
+the project that know byte offsets. The mirrors cannot drift silently:
+`app/tests/runtime/bridge_layout.c` prints the layout as the C compiler sees
+it, and
 `tools/check-bridge.mjs` compares both mirrors with it (the `bridge_mirrors`
 test of `task test`). This section is the overview.
 
@@ -554,7 +692,8 @@ microseconds), which all three threads compute the same way.
    header (`frame_time_us`), increments `frame_tick` and wakes the app, which
    has been waiting on that word (`bridge_wait_frame()`).
 2. The app runs as many fixed steps as the time since the previous frame time
-   pays for (`app/src/fixed_step.c`, which caps a single catch-up at 100 ms),
+   pays for (`app/src/runtime/fixed_step.c`, which caps a single catch-up at
+   100 ms),
    writing a snapshot per step (the camera plus one pose per slot) into a ring
    that keeps the newest `BRIDGE_SNAPSHOT_COUNT` (32) steps. Each snapshot
    carries the moment its step stands for: the newest one of a burst stands
@@ -619,8 +758,8 @@ add fields, append record types, grow capacities, add sections. None of that
 requires rebuilding the renderer, which is why normal C iteration never
 touches Rust. A change in meaning bumps `BRIDGE_VERSION` (in `bridge.h`, and
 the matching constants `handshake::VERSION` in `renderer/src/bridge.rs` and
-`LAYOUT.handshake.version` in `dom/bridge.js`). On a mismatch the renderer and the page
-refuse to attach and say so on the page, instead of drawing garbage. The
+`LAYOUT.handshake.version` in `dom/runtime/bridge.js`). On a mismatch the
+renderer and the page refuse to attach and say so on the page, instead of drawing garbage. The
 `static_assert` layout guards at the end of `bridge.h` catch a field that moved
 by accident.
 
@@ -676,11 +815,11 @@ as the scene provides what the demo looks for, by name:
 | `Tabletop_Collider` | a box collider: the table top. Clicks drop balls inside its outline, and landing on it makes the "floor" sound. | the box collider with the largest footprint is used; with no boxes at all, clicks drop inside a 6 × 4 m area at height 0 |
 | every other collider | a static Box3D body with that shape (rails, obstacles, ramps); hitting one makes the "wall" sound | |
 
-To match a different scene, change the names at the top of `app/src/app.c`
-(`BALL_NODE`, `PLAYER_VARIANT`, `TABLE_COLLIDER`). The native runs and tests
-do not load the bundle; `headless_send_scene()` in `app/src/headless.c`
-describes the bundled scene's colliders by hand, so update it if you want the
-tests to match your scene.
+To match a different scene, change the names at the top of
+`app/src/game/game.c` (`BALL_NODE`, `PLAYER_VARIANT`, `TABLE_COLLIDER`). The
+native runs and tests do not load the bundle; `game_headless_scene()` in
+`app/src/game/headless.c` describes the bundled scene's colliders by hand, so
+update it if you want the tests to match your scene.
 
 What the renderer can drive and report:
 
@@ -702,6 +841,9 @@ What the renderer can drive and report:
   colliders are not reported.
 * **App state does not survive a hot swap.** Each swap starts the app fresh.
 * **Fixed app memory.** The app's memory cannot grow (see above).
+* **The sound player has the demo's voices.** `audio/` is runtime code, but
+  its `Audio` class has one method per demo sound (`land`, `wallHit`,
+  `ballClack`, `roll`); a sound of your own needs a method there.
 
 ## Licences and credits
 

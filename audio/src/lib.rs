@@ -1,10 +1,11 @@
 //! The page's sound.
 //!
 //! This project runs on three threads that share one block of memory (see
-//! `app/src/bridge.h`). Sound belongs to none of the workers: WebAudio exists
-//! only on the main thread, so this crate is a plain wasm-bindgen module that
-//! `dom/main.js` imports next to its own code. It knows nothing about the
-//! bridge. The page drains the app's cues and calls the methods of [`Audio`];
+//! `app/src/runtime/bridge.h`). Sound belongs to none of the workers: WebAudio
+//! exists only on the main thread, so this crate is a plain wasm-bindgen
+//! module that `dom/runtime/main.js` imports next to its own code. It knows
+//! nothing about the bridge. The page drains the app's cues, and the game's
+//! cue handler (`dom/game.js`) calls the methods of [`Audio`];
 //! this module turns them into WebAudio changes with `awsm-audio-player`.
 //!
 //! # Map

@@ -1,6 +1,8 @@
-# The C app (app/), including Box3D (app/vendored/box3d). Thin wrappers: all build configuration lives in
-# app/CMakeLists.txt and app/CMakePresets.json, so `cmake --preset ...` in app/
-# does exactly what these do. Build trees: app/build/<preset>.
+# The C app (app/): your game (app/src/game/) and the runtime that runs it
+# (app/src/runtime/), with Box3D (app/vendored/box3d). Thin wrappers: all
+# build configuration lives in app/CMakeLists.txt and app/CMakePresets.json,
+# so `cmake --preset ...` in app/ does exactly what these do. Build trees:
+# app/build/<preset>.
 #
 #   debug / release   native (tests, the headless run, sanitizers in debug)
 #   wasm / wasm-dev   Emscripten: app.js + app.wasm, in the preset's build tree
@@ -41,7 +43,7 @@ tasks:
       - cmake --preset debug
       - |
         if command -v emcc >/dev/null 2>&1; then cmake --preset wasm-dev
-        else echo "emcc not found: skipping wasm-dev (src/web_* will lack editor support)"; fi
+        else echo "emcc not found: skipping wasm-dev (src/runtime/web_* will lack editor support)"; fi
 
   # Builds one wasm preset and installs it as dist/app/: the two Emscripten
   # outputs plus the worker script that loads them. Copying from the tree that
@@ -117,7 +119,7 @@ tasks:
       - sh: command -v clang-format
         msg: 'clang-format not found. Install it with: brew install clang-format'
     cmds:
-      - clang-format -i src/*.c src/*.h tests/*.c tests/*.h
+      - clang-format -i src/*/*.c src/*/*.h tests/*/*.c tests/*/*.h
 
   clean:
     desc: Delete the C build trees (app/build/)

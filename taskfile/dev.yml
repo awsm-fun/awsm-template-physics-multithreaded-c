@@ -6,10 +6,10 @@
 # stamp change and tells the page what to do:
 #
 #   you save under   the watcher runs      stamp            the page
-#   app/             task app:dev          app.stamp        swaps the app worker
+#   app/ (game/ too) task app:dev          app.stamp        swaps the app worker
 #   renderer/        task renderer:dev     renderer.stamp   reloads
 #   audio/           task audio:dev        audio.stamp      reloads
-#   dom/             task dom:build        dom.stamp        reloads
+#   dom/ (game.js)   task dom:build        dom.stamp        reloads
 #   media/ *         task media:build      media.stamp      reloads
 #
 #   * and renderer/vendored/, the texture transcoder that task also copies

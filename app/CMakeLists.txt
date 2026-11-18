@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.26)
 project(awsm_app LANGUAGES C)
 
-# The app thread: all application logic, in C, built natively (tests, headless
-# runs, sanitizers) and with Emscripten for the browser (presets `wasm` and
-# `wasm-dev`). See CMakePresets.json for the configurations.
+# The app thread: your game (src/game/) and the runtime that runs it
+# (src/runtime/), in C, built natively (tests, headless runs, sanitizers) and
+# with Emscripten for the browser (presets `wasm` and `wasm-dev`). See
+# CMakePresets.json for the configurations.
 
 # --- Language standard -------------------------------------------------------
 set(CMAKE_C_STANDARD 23)
@@ -127,9 +128,10 @@ if(EMSCRIPTEN)
 endif()
 
 # --- Box3D ---------------------------------------------------------------------
-# The real engine (https://github.com/erincatto/box3d), unmodified, as a git
-# submodule. Its own CMake project builds the `box3d` static library; because
-# we are not its top-level project it skips its samples, tests and downloads.
+# The real physics library (https://github.com/erincatto/box3d), unmodified,
+# as a git submodule. Its own CMake project builds the `box3d` static library;
+# because we are not its top-level project it skips its samples, tests and
+# downloads.
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendored/box3d/CMakeLists.txt")
     message(FATAL_ERROR
         "app/vendored/box3d is empty. Fetch the submodule with:\n"
@@ -153,13 +155,20 @@ if(NOT EMSCRIPTEN)
 endif()
 
 # --- Library: the app itself, shared by the entry points and the tests --------
+# Your game is every .c file in src/game/, picked up on the next build (no
+# edit here when you add one). The runtime's files are listed. One library,
+# because the two call each other (the runtime calls the game's hooks, the
+# game calls runtime_*). Headers are included by their path under src/:
+# "game/game.h", "runtime/runtime.h".
+file(GLOB GAME_SOURCES CONFIGURE_DEPENDS src/game/*.c)
 add_library(core
-    src/app.c
-    src/bridge.c
-    src/camera.c
-    src/fixed_step.c
-    src/headless.c
-    src/physics.c
+    ${GAME_SOURCES}
+    src/runtime/bridge.c
+    src/runtime/camera.c
+    src/runtime/fixed_step.c
+    src/runtime/headless.c
+    src/runtime/physics.c
+    src/runtime/runtime.c
 )
 target_include_directories(core PUBLIC src)
 target_link_libraries(core PUBLIC box3d PRIVATE project_options)
@@ -169,10 +178,10 @@ endif()
 
 # --- Entry point ----------------------------------------------------------------
 # One target named `app` either way:
-#   native  -> an executable that runs the app headless (src/main.c)
-#   wasm    -> app.js + app.wasm for the browser worker (src/web_main.c)
+#   native  -> an executable that runs the app headless (src/runtime/main.c)
+#   wasm    -> app.js + app.wasm for the browser worker (src/runtime/web_main.c)
 if(EMSCRIPTEN)
-    add_executable(app src/web_main.c)
+    add_executable(app src/runtime/web_main.c)
     target_link_libraries(app PRIVATE core project_options)
     target_link_options(app PRIVATE
         # app.js is an ES module whose default export instantiates the wasm:
@@ -189,7 +198,7 @@ if(EMSCRIPTEN)
         # expression evaluated at load time: one per core beyond the three
         # threads that already exist (page, renderer, app), at most four, so a
         # small machine starts none. It must agree with solver_thread_count()
-        # in web_main.c. STRICT=2 turns "needed a thread that was not
+        # in runtime/web_main.c. STRICT=2 turns "needed a thread that was not
         # pre-created" into an error instead of a hang.
         "-sPTHREAD_POOL_SIZE=Math.max(0,Math.min(4,(navigator.hardwareConcurrency||1)-3))"
         -sPTHREAD_POOL_SIZE_STRICT=2
@@ -208,7 +217,8 @@ if(EMSCRIPTEN)
         # The worker posts `mod.wasmMemory.buffer` (the SharedArrayBuffer) to
         # the page.
         -sEXPORTED_RUNTIME_METHODS=wasmMemory
-        # No main(): JS calls the EMSCRIPTEN_KEEPALIVE exports in web_main.c.
+        # No main(): JS calls the EMSCRIPTEN_KEEPALIVE exports in
+        # runtime/web_main.c.
         --no-entry
         $<$<CONFIG:Debug>:-sASSERTIONS=1>
     )
@@ -218,23 +228,30 @@ if(EMSCRIPTEN)
     # Linking straight into dist/ would have both wasm presets write the same
     # files, and Ninja cannot tell when another build tree has replaced them.
 else()
-    add_executable(app src/main.c)
+    add_executable(app src/runtime/main.c)
     target_link_libraries(app PRIVATE core project_options)
 endif()
 
 # --- Tests --------------------------------------------------------------------
-# (Under Emscripten, ctest runs these through node automatically.)
+# (Under Emscripten, ctest runs these through node automatically.) Every
+# tests/runtime/test_<name>.c and tests/game/test_<name>.c is a test called
+# <name> (so a new test_*.c in tests/game/ needs no edit here). They include
+# "runtime/check.h" from tests/.
 enable_testing()
-foreach(_name IN ITEMS bridge app)
-    add_executable(test_${_name} tests/test_${_name}.c)
-    target_link_libraries(test_${_name} PRIVATE core project_options)
-    add_test(NAME ${_name} COMMAND test_${_name})
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS tests/runtime/test_*.c tests/game/test_*.c)
+foreach(_source IN LISTS TEST_SOURCES)
+    get_filename_component(_target "${_source}" NAME_WE)
+    string(REGEX REPLACE "^test_" "" _name "${_target}")
+    add_executable(${_target} "${_source}")
+    target_include_directories(${_target} PRIVATE tests)
+    target_link_libraries(${_target} PRIVATE core project_options)
+    add_test(NAME ${_name} COMMAND ${_target})
 endforeach()
 
 # The cross-language layout check: bridge_layout prints what THIS compiler
 # makes of bridge.h, and the script compares the Rust and JS mirrors
-# (renderer/src/bridge.rs, dom/bridge.js) with it.
-add_executable(bridge_layout tests/bridge_layout.c)
+# (renderer/src/bridge.rs, dom/runtime/bridge.js) with it.
+add_executable(bridge_layout tests/runtime/bridge_layout.c)
 target_link_libraries(bridge_layout PRIVATE core project_options)
 find_program(NODE_EXECUTABLE node REQUIRED)
 add_test(NAME bridge_mirrors

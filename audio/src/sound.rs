@@ -62,7 +62,7 @@
 //! never its distance or pitch, so rail-to-rail still pans near-hard L/R while
 //! the stereo image tracks the view from any angle. The page re-sends the
 //! listener whenever the app reports a new camera yaw, via
-//! `set_listener_live`, which moves the real `AudioListener` — so the engine
+//! `set_listener_live`, which moves the real `AudioListener` — so WebAudio
 //! re-spatializes **every ringing voice**, and a one-shot fired before you
 //! orbit swings correctly as you move. The ball's own y is ignored — it only
 //! sounds while on the surface.

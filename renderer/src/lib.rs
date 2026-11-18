@@ -13,7 +13,7 @@
 //! published steps around one step before the PREVIOUS frame's time,
 //! interpolates between them, moves the corresponding transforms, and draws
 //! (Fix Your Timestep, across two threads; see "Frame pacing" in
-//! `app/src/bridge.h`).
+//! `app/src/runtime/bridge.h`).
 //!
 //! It is an ordinary single-threaded wasm module. The bridge block lives in
 //! the APP's memory, which this module cannot address directly, so all access
