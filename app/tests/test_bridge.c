@@ -72,8 +72,8 @@ static void test_init_rejects_bad_memory(void) {
         return;
     }
     CHECK(bridge_init(nullptr, size, 60.0f) == nullptr);
-    CHECK(bridge_init(memory, size - 1, 60.0f) == nullptr);   // too small
-    CHECK(bridge_init(memory + 4, size, 60.0f) == nullptr);   // misaligned
+    CHECK(bridge_init(memory, size - 1, 60.0f) == nullptr);    // too small
+    CHECK(bridge_init(memory + 4, size, 60.0f) == nullptr);    // misaligned
     CHECK(bridge_init(memory, size, 60.0f) == (void *)memory); // just right
     free(memory);
 }
@@ -129,7 +129,7 @@ static void test_ring_full_drops(void) {
     CHECK(atomic_load(&ring->dropped) == 1);
 
     CHECK(bridge_ring_pop(ring, &out));
-    CHECK(out.u[0] == 0); // the oldest survived
+    CHECK(out.u[0] == 0);                  // the oldest survived
     CHECK(bridge_ring_push(ring, &extra)); // room again
 
     uint32_t count = 0;

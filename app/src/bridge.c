@@ -92,7 +92,8 @@ bridge_header *bridge_init(void *memory, size_t size, float step_hz) {
 }
 
 bridge_header *bridge_create(float step_hz) {
-    size_t size = bridge_block_size(); // already a multiple of BRIDGE_ALIGN, as aligned_alloc requires
+    size_t size =
+        bridge_block_size(); // already a multiple of BRIDGE_ALIGN, as aligned_alloc requires
     void *memory = aligned_alloc(BRIDGE_ALIGN, size);
     bridge_header *bridge = bridge_init(memory, size, step_hz);
     if (bridge == nullptr) {

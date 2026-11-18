@@ -120,8 +120,8 @@ static void test_keys_roll_the_ball_and_rails_hold(void) {
 
     const app_ball *ball = &f->app.balls[APP_PLAYER_SLOT];
     CHECK(ball->position.x > 1.0f);
-    CHECK(ball->position.x < 2.9f);    // the east rail's inner face is at 2.9
-    CHECK(ball->rotation.w < 0.9999f); // it rolled, so it turned
+    CHECK(ball->position.x < 2.9f);                // the east rail's inner face is at 2.9
+    CHECK(ball->rotation.w < 0.9999f);             // it rolled, so it turned
     CHECK(f->outbox.cues_by_id[APP_CUE_WALL] > 0); // it knocked against the rail
     fixture_free(f);
 }

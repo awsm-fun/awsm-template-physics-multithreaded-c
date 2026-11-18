@@ -49,11 +49,11 @@ constexpr float MAX_SPEED = 6.0f;   // m/s, cap on horizontal speed from the key
 constexpr float JUMP_SPEED = 3.2f;  // m/s upwards when Space is pressed
 
 // Touch: a swipe throws the player's ball.
-constexpr float TAP_SLOP_PX = 12.0f;     // a touch that travels less is a tap
+constexpr float TAP_SLOP_PX = 12.0f;          // a touch that travels less is a tap
 constexpr uint32_t FLING_WINDOW_US = 120'000; // speed is measured over the end of the swipe
-constexpr float FLING_GAIN = 0.004f;     // swipe speed in px/s → ball speed in m/s
-constexpr float FLING_MIN_SPEED = 0.25f; // slower swipes are ignored
-constexpr float FLING_MAX_SPEED = 9.0f;  // faster ones are capped
+constexpr float FLING_GAIN = 0.004f;          // swipe speed in px/s → ball speed in m/s
+constexpr float FLING_MIN_SPEED = 0.25f;      // slower swipes are ignored
+constexpr float FLING_MAX_SPEED = 9.0f;       // faster ones are capped
 
 // Sound cues.
 constexpr float HIT_MIN_SPEED = 0.8f;   // m/s; slower contacts are not "hits" (Box3D enforces it)
@@ -692,8 +692,8 @@ static void steer_player(app_state *app, float dt) {
     // An impulse of mass × acceleration × dt adds the same speed per second
     // at any step rate and for any ball size.
     b3BodyId body = player(app)->body;
-    vec3 push = vec3_scale(vec3_normalize(view_to_ground(app, x, z)),
-                           MOVE_ACCEL * dt * app->ball_mass);
+    vec3 push =
+        vec3_scale(vec3_normalize(view_to_ground(app, x, z)), MOVE_ACCEL * dt * app->ball_mass);
     b3Body_ApplyLinearImpulseToCenter(body, to_b3(push), true);
 
     // Holding a key keeps adding speed; cap the horizontal part. Vertical

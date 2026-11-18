@@ -2,7 +2,8 @@
 //
 // It drives the app exactly the way the browser does (frame times feeding the
 // fixed-step clock, input batched per page frame), with headless.c standing
-// in for the renderer and the page. Handy as a quick sanity check, under a debugger, or with sanitizers:
+// in for the renderer and the page. Handy as a quick sanity check, under a debugger, or with
+// sanitizers:
 //
 //   ./app/build/debug/app        # 5 simulated seconds
 //   ./app/build/debug/app 20     # 20 simulated seconds
@@ -31,7 +32,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "error: could not allocate the bridge block\n");
         return EXIT_FAILURE;
     }
-    static app_state app; // static: it is large, no need to put it on the stack
+    static app_state app;      // static: it is large, no need to put it on the stack
     app_init(&app, bridge, 1); // 1: step Box3D on this thread only
     fixed_step clock_state = {0};
     headless_outbox outbox = {0};

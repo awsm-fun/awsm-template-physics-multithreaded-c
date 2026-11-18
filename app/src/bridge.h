@@ -333,7 +333,7 @@ typedef struct bridge_record {
     union {
         uint32_t u[14];
         float f[14];
-    };          //  8
+    }; //  8
 } bridge_record; // 64
 
 // Names cross the bridge as 32-bit hashes, never as strings: bridge_hash() of
@@ -494,7 +494,8 @@ static_assert(offsetof(bridge_pose, flags) == 28, "bridge_pose.flags");
 
 static_assert(sizeof(bridge_snapshot_header) == 64, "bridge_snapshot_header size");
 static_assert(offsetof(bridge_snapshot_header, step) == 4, "bridge_snapshot_header.step");
-static_assert(offsetof(bridge_snapshot_header, pose_count) == 8, "bridge_snapshot_header.pose_count");
+static_assert(offsetof(bridge_snapshot_header, pose_count) == 8,
+              "bridge_snapshot_header.pose_count");
 static_assert(offsetof(bridge_snapshot_header, time_us) == 12, "bridge_snapshot_header.time_us");
 static_assert(offsetof(bridge_snapshot_header, camera) == 16, "bridge_snapshot_header.camera");
 
@@ -505,8 +506,10 @@ static_assert(offsetof(bridge_ring, dropped) == 12, "bridge_ring.dropped");
 static_assert(sizeof(bridge_record) == 64, "bridge_record size");
 static_assert(offsetof(bridge_record, u) == 8, "bridge_record payload");
 
-static_assert((BRIDGE_SNAPSHOT_COUNT & (BRIDGE_SNAPSHOT_COUNT - 1u)) == 0, "snapshot count must be a power of two");
-static_assert((BRIDGE_RING_CAPACITY & (BRIDGE_RING_CAPACITY - 1u)) == 0, "ring capacity must be a power of two");
+static_assert((BRIDGE_SNAPSHOT_COUNT & (BRIDGE_SNAPSHOT_COUNT - 1u)) == 0,
+              "snapshot count must be a power of two");
+static_assert((BRIDGE_RING_CAPACITY & (BRIDGE_RING_CAPACITY - 1u)) == 0,
+              "ring capacity must be a power of two");
 
 // ── C API (implemented in bridge.c) ────────────────────────────────────────
 // Declared below this line by the app side. Everything above is the wire

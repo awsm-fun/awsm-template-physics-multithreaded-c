@@ -116,10 +116,22 @@ static inline mat4 mat4_look_at(vec3 eye, vec3 target, vec3 up) {
     vec3 s = vec3_normalize(vec3_cross(f, up));     // right
     vec3 u = vec3_cross(s, f);                      // true up
     return (mat4){{
-        s.x, u.x, -f.x, 0.0f,
-        s.y, u.y, -f.y, 0.0f,
-        s.z, u.z, -f.z, 0.0f,
-        -vec3_dot(s, eye), -vec3_dot(u, eye), vec3_dot(f, eye), 1.0f,
+        s.x,
+        u.x,
+        -f.x,
+        0.0f,
+        s.y,
+        u.y,
+        -f.y,
+        0.0f,
+        s.z,
+        u.z,
+        -f.z,
+        0.0f,
+        -vec3_dot(s, eye),
+        -vec3_dot(u, eye),
+        vec3_dot(f, eye),
+        1.0f,
     }};
 }
 
@@ -129,10 +141,22 @@ static inline mat4 mat4_perspective(float fov_y, float aspect, float near, float
     float w = h / aspect;
     float r = far / (near - far);
     return (mat4){{
-        w, 0.0f, 0.0f, 0.0f,
-        0.0f, h, 0.0f, 0.0f,
-        0.0f, 0.0f, r, -1.0f,
-        0.0f, 0.0f, r * near, 0.0f,
+        w,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        h,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        r,
+        -1.0f,
+        0.0f,
+        0.0f,
+        r * near,
+        0.0f,
     }};
 }
 

@@ -17,7 +17,7 @@ void headless_send_scene(bridge_header *bridge);
 
 // Plays the page's part of user input.
 void headless_set_canvas(bridge_header *bridge, uint32_t width, uint32_t height);
-void headless_key(bridge_header *bridge, uint32_t key, bool down); // event + held state
+void headless_key(bridge_header *bridge, uint32_t key, bool down);    // event + held state
 void headless_click(bridge_header *bridge, float ndc_x, float ndc_y); // left mouse button
 // A right-button mouse drag by (dx, dy) CSS pixels.
 void headless_right_drag(bridge_header *bridge, float dx_px, float dy_px);
@@ -33,9 +33,9 @@ typedef struct headless_outbox {
     uint32_t binds;
     uint32_t spawns;
     uint32_t despawns;
-    uint32_t cues;                              // all BRIDGE_CUE records
-    uint32_t cues_by_id[HEADLESS_CUE_KINDS];    // ... per cue id (u[0])
-    float last_cue_value[HEADLESS_CUE_KINDS];   // f[1] of the latest cue with each id
+    uint32_t cues;                            // all BRIDGE_CUE records
+    uint32_t cues_by_id[HEADLESS_CUE_KINDS];  // ... per cue id (u[0])
+    float last_cue_value[HEADLESS_CUE_KINDS]; // f[1] of the latest cue with each id
     uint32_t last_spawn_slot;
     uint32_t last_spawn_node; // node hash of the most recent SPAWN
 } headless_outbox;
