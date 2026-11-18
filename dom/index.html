@@ -157,8 +157,9 @@
               nothing when it is closed.
             </p>
             <p>
-              <code>ms / frame</code> is time per rendered frame. <code>µs / step</code> is time
-              per simulation step (1000 µs = 1 ms). <code>/ s</code> is per second.
+              <span class="about-unit">ms / frame</span> is time per rendered frame.
+              <span class="about-unit">µs / step</span> is time per simulation step (1000 µs =
+              1 ms). <span class="about-unit">/ s</span> is per second.
             </p>
 
             <h3>frame budget</h3>
@@ -204,7 +205,7 @@
               </dd>
             </dl>
 
-            <h3>GPU</h3>
+            <h3 data-lane="gpu">GPU</h3>
             <dl>
               <dt>GPU time per frame</dt>
               <dd>
@@ -218,7 +219,7 @@
               </dd>
             </dl>
 
-            <h3>renderer (render worker)</h3>
+            <h3 data-lane="renderer">renderer (render worker)</h3>
             <dl>
               <dt>the header</dt>
               <dd>The render thread's CPU time per frame.</dd>
@@ -239,7 +240,7 @@
               </dd>
             </dl>
 
-            <h3>app (C, app worker)</h3>
+            <h3 data-lane="sim">app (C, app worker)</h3>
             <dl>
               <dt>the header</dt>
               <dd>
@@ -262,7 +263,7 @@
               <dd>How many balls you have dropped, and the latest impact sound with its strength.</dd>
             </dl>
 
-            <h3>physics (Box3D, N threads)</h3>
+            <h3 data-lane="sim">physics (Box3D, N threads)</h3>
             <dl>
               <dt>the header</dt>
               <dd>
@@ -276,7 +277,7 @@
               </dd>
             </dl>
 
-            <h3>page (main thread)</h3>
+            <h3 data-lane="page">page (main thread)</h3>
             <dl>
               <dt>frame marks + sound cues</dt>
               <dd>
