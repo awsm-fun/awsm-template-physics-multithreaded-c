@@ -38,13 +38,12 @@ futures = { version = "0.3", default-features = false, features = ["alloc"] }
 gloo-net = { version = "0.7", default-features = false, features = ["http"] }
 
 # ── wasm-bindgen ─────────────────────────────────────────────────────────────
-# The same pinned set as renderer/Cargo.toml, for the same reason: these four
-# are released together, the `-sys` crates pin their wasm-bindgen exactly, and
-# wasm-bindgen itself must match the installed `wasm-bindgen` CLI version
-# exactly. Upgrade both crates together, and the CLI with them.
-wasm-bindgen = "=0.2.126"
-wasm-bindgen-futures = "=0.4.76"
-js-sys = "=0.3.103"
+# No exact pins: Cargo.lock records the versions, and the tasks require a
+# `wasm-bindgen` CLI of exactly the locked version. `cargo update` moves these
+# four together; afterwards install the CLI that `task setup` names.
+wasm-bindgen = "0.2.130"
+wasm-bindgen-futures = "0.4.80"
+js-sys = "0.3.107"
 
 # ── logging to the browser console ───────────────────────────────────────────
 # The same setup as the renderer, so this crate's messages and the player's
@@ -54,7 +53,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 tracing-web = "0.1"
 
 [dependencies.web-sys]
-version = "=0.3.103"
+version = "0.3.107"
 features = [
     "console",
     "RequestCache",

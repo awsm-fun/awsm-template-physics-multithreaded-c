@@ -134,13 +134,13 @@ and prints the install hint shown here for any that is missing.
 | watchexec | `brew install watchexec` | 2.3 |
 | Rust (`cargo`, via rustup) | [rustup.rs](https://rustup.rs) | 1.100 stable |
 | Rust wasm target | `rustup target add wasm32-unknown-unknown` | |
-| wasm-bindgen CLI | `cargo install wasm-bindgen-cli --locked --version 0.2.126` | 0.2.126 |
+| wasm-bindgen CLI | `cargo install wasm-bindgen-cli --locked --version <locked>` | the version in `renderer/Cargo.lock` |
 | wasm-opt (Binaryen) | `brew install binaryen` | 123 |
 | clang-format (optional, for `task fmt`) | `brew install clang-format` | |
 
 The wasm-bindgen CLI must be exactly the version of the `wasm-bindgen` crate
-pinned in `renderer/Cargo.toml` and `audio/Cargo.toml` (currently `=0.2.126`),
-or it refuses their wasm. Git is needed too: Box3D is a submodule. You also need a browser with WebGPU.
+in `renderer/Cargo.lock` and `audio/Cargo.lock` (`task setup` prints it; update
+both locks together), or it refuses their wasm. Git is needed too: Box3D is a submodule. You also need a browser with WebGPU.
 
 No separate LLVM install is needed. One of the renderer's dependencies
 (`meshopt`) contains C++ that has to be compiled to wasm, and Apple's clang
