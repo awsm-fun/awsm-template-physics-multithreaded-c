@@ -17,9 +17,9 @@ use awsm_renderer::materials::MaterialKey;
 use awsm_renderer::meshes::MeshKey;
 use awsm_renderer::transforms::{Transform, TransformKey};
 use awsm_renderer::AwsmRenderer;
-use awsm_renderer_scene::{ColliderShape, EditorNode, NodeId, NodeKind, Trs};
+use awsm_renderer_scene::{AntiAliasingConfig, ColliderShape, EditorNode, NodeId, NodeKind, Trs};
 use awsm_renderer_scene_loader::assets::HttpAssets;
-use awsm_renderer_scene_loader::{load_scene_for_player, LoadedScene};
+use awsm_renderer_scene_loader::{load_scene_for_player, LoadedScene, ParticleDriver};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::bridge::{bridge_hash, Collider, Shape};
@@ -36,6 +36,9 @@ pub struct SceneIndex {
     /// Name hash → index into `nodes`. Several names can lead to the same
     /// entry: a group and the mesh inside it both resolve to that mesh.
     by_name: HashMap<u32, usize>,
+    /// The scene's particle emitters. The loader builds them; they only move
+    /// when ticked, once per frame.
+    pub particles: ParticleDriver,
 }
 
 /// A scene node with renderable meshes, plus everything needed to put it back
@@ -103,11 +106,20 @@ pub async fn load(renderer: &mut AwsmRenderer, base_url: &str) -> Result<SceneIn
         futures::join!(renderer.ensure_config_pipelines(), fetch_scene(&scene_url));
     let compiled =
         compiled.map_err(|err| format!("could not compile the render pipelines: {err}"))?;
-    let scene = scene?;
+    let mut scene = scene?;
     page::post_progress(&format!(
         "core pipelines ready ({compiled}) · scene parsed ({} nodes)",
         scene.nodes.len()
     ));
+
+    // The anti-aliasing is the page's choice (its Settings), and the renderer
+    // already runs it. The loader applies the scene's authored anti-aliasing,
+    // so the scene is given the renderer's: the loader then changes nothing,
+    // and nothing is compiled for a mode this session does not use.
+    scene.post_process.anti_aliasing = AntiAliasingConfig {
+        msaa: renderer.anti_aliasing.msaa_sample_count.is_some(),
+        smaa: renderer.anti_aliasing.smaa,
+    };
 
     // The loader asks for bundle-relative paths (`assets/<id>.png`, …) and
     // this fetches them from next to `scene.toml`.
@@ -143,6 +155,7 @@ pub async fn load(renderer: &mut AwsmRenderer, base_url: &str) -> Result<SceneIn
         colliders,
         nodes: Vec::new(),
         by_name: HashMap::new(),
+        particles: ParticleDriver::new(&loaded),
     };
     index_nodes(
         &scene.nodes,
@@ -152,9 +165,10 @@ pub async fn load(renderer: &mut AwsmRenderer, base_url: &str) -> Result<SceneIn
         &mut HashMap::new(),
     );
     tracing::info!(
-        "scene loaded: {} colliders, {} drivable nodes",
+        "scene loaded: {} colliders, {} drivable nodes, {} particle emitters",
         index.colliders.len(),
-        index.nodes.len()
+        index.nodes.len(),
+        index.particles.len()
     );
     Ok(index)
 }

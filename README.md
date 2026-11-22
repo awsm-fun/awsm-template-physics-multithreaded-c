@@ -107,7 +107,7 @@ what it is per:
 | frame budget | the time one display refresh allows (16.7 ms at 60 Hz) and the headroom left by whichever of the GPU and the threads uses most of it | the GPU and each thread: time per frame, out of the budget (the app worker's is its whole step, Box3D's included, times the steps per frame); and, for reference, the latency of a frame (renderer + GPU) |
 | display | refresh rate and frames per second | missed frames (refreshes with no new frame: any steady count is visible stutter) |
 | GPU | GPU time per frame | per render pass (on Apple GPUs the passes overlap, so they add up to more than the frame) |
-| renderer (render worker) | the render worker's CPU time per frame | its phases (reading the app's state, camera, transforms, `render()`) and, under `render()`, what awsm-renderer spends preparing the frame (uploads, bind groups, …), encoding each pass and submitting, with what is left over |
+| renderer (render worker) | the render worker's CPU time per frame | its phases (reading the app's state, the scene's clips and particles, camera, transforms, `render()`) and, under `render()`, what awsm-renderer spends preparing the frame (uploads, bind groups, …), encoding each pass and submitting, with what is left over |
 | app (C, app worker) | the app's own CPU time per step, without Box3D's | steps per second, frames the app was late for (its steps did not finish within a frame), the phases of a step, dropped balls, the last impact cue |
 | physics (Box3D, N threads) | the time of Box3D's step, which the app worker runs together with the solver threads | Box3D's stages (pairs, collide, solve, sensors) and the parts of its solver |
 | page (main thread) | the main thread's work per frame | |
@@ -835,6 +835,11 @@ What the renderer can drive and report:
   console warning. Scale is folded into the dimensions; for a round shape under
   non-uniform scale the largest axis is used.
 * Prefab subtrees are templates, not part of the world, and are ignored.
+* **Clips, scrolling textures and particles** in the scene play on their own,
+  advanced each frame before the app's poses are applied (so on a node the
+  app drives, the app wins; keep clips off those nodes).
+* **Anti-aliasing** comes from Settings, not from the scene: the bundle's
+  authored setting is ignored.
 
 ## Limitations and next steps
 

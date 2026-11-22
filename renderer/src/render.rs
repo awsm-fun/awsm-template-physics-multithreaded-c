@@ -349,6 +349,8 @@ struct App {
     /// Set while frames are failing, so a persistent failure is reported once
     /// rather than sixty times a second.
     render_failing: bool,
+    /// The same for advancing the scene's clips.
+    animation_failing: bool,
     warned_unknown_record: bool,
 }
 
@@ -421,6 +423,7 @@ impl App {
             profile: Profile::default(),
             last_frame_ms: None,
             render_failing: false,
+            animation_failing: false,
             warned_unknown_record: false,
         })
     }
@@ -461,6 +464,16 @@ impl App {
             bridge.begin_frame(frame_us);
             self.published_frame_us = Some(frame_us);
         }
+
+        // The scene's own motion, by the real time since the previous frame.
+        // Before the app's commands and poses below, so on a node the app
+        // drives, the app's pose is the one drawn.
+        lap_ms = self.profile.lap(Phase::ReadApp, &self.performance, lap_ms);
+        let dt_ms = self
+            .last_frame_ms
+            .map_or(0.0, |last| (frame_ms - last).max(0.0));
+        self.animate(dt_ms);
+        lap_ms = self.profile.lap(Phase::Animate, &self.performance, lap_ms);
 
         if let Some(bridge) = self.bridge.as_mut() {
             // Hand over as much of the scene description as the ring takes.
@@ -613,6 +626,28 @@ impl App {
         }
         self.last_frame_ms = Some(frame_ms);
         job
+    }
+
+    /// Advances what the scene animates by itself: its clips and texture UV
+    /// flows (`update_animations`, which writes the transforms, morphs and
+    /// material values they target) and its particle emitters.
+    ///
+    /// A clip is best kept off the nodes the app drives: a slot writes its
+    /// pose only when the pose changes, so on a node at rest the clip would
+    /// show.
+    fn animate(&mut self, dt_ms: f64) {
+        match self.renderer.update_animations(dt_ms) {
+            Ok(()) => self.animation_failing = false,
+            Err(err) => {
+                if !self.animation_failing {
+                    self.animation_failing = true;
+                    tracing::warn!("advancing the scene's clips failed: {err}");
+                }
+            }
+        }
+        self.scene
+            .particles
+            .tick(&mut self.renderer, (dt_ms / 1000.0) as f32);
     }
 
     /// Connects to an app instance's bridge block, replacing any previous one.
