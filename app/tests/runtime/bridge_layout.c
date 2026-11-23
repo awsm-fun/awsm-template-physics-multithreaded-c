@@ -83,6 +83,8 @@ int main(void) {
     OFFSET(bridge_stats, app_late);
     OFFSET(bridge_stats, detail);
     OFFSET(bridge_stats, physics_step_us);
+    OFFSET(bridge_stats, frame_interval);
+    OFFSET(bridge_stats, paced_skips);
 
     group("timing");
     OFFSET(bridge_timing, kind);

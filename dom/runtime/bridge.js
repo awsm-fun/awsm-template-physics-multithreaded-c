@@ -62,6 +62,8 @@ export const LAYOUT = {
     app_late: 40,
     detail: 44, // written by this page: the `detail` bits below
     physics_step_us: 48,
+    frame_interval: 52,
+    paced_skips: 56,
   },
   // BRIDGE_DETAIL_*: the breakdowns the stats panel is showing.
   detail: { APP: 1, RENDERER: 2, GPU: 4, PHYSICS: 8 },
@@ -460,6 +462,10 @@ export class Bridge {
       frameSpanUs: load(STATS.frame_span_us),
       appLate: load(STATS.app_late),
       physicsStepUs: load(STATS.physics_step_us),
+      // Refreshes per presented frame while the renderer paces (0 from one
+      // that does not: every refresh), and the refreshes it skipped on purpose.
+      frameInterval: Math.max(load(STATS.frame_interval), 1),
+      pacedSkips: load(STATS.paced_skips),
       latestStep: Atomics.load(this.#u32, Bridge.#word(this.#base + HEADER.latest_step)),
     };
   }

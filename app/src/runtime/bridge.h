@@ -292,7 +292,16 @@ typedef struct bridge_stats {
     // it as the physics time, and the rest of step_work_us as the app's own.
     _Atomic uint32_t physics_step_us; // 48  total microseconds (wraps)
 
-    uint32_t reserved[3]; // 52
+    // Written by a renderer that paces its frames (draws on every Nth refresh
+    // only, to give a slow GPU an even rate). frame_interval is the N it is
+    // drawing at now; paced_skips counts the refreshes it skipped on purpose,
+    // so the page tells them from missed frames and measures the frame budget
+    // against N refreshes. A renderer that draws on every refresh leaves both
+    // at 0, which the page reads as N = 1.
+    _Atomic uint32_t frame_interval; // 52  refreshes per frame (0 = 1)
+    _Atomic uint32_t paced_skips;    // 56  refreshes skipped on purpose (wraps)
+
+    uint32_t reserved[1]; // 60
 } bridge_stats;           // 64
 
 // bridge_stats.detail
@@ -585,6 +594,8 @@ static_assert(offsetof(bridge_stats, frame_span_us) == 36, "bridge_stats.frame_s
 static_assert(offsetof(bridge_stats, app_late) == 40, "bridge_stats.app_late");
 static_assert(offsetof(bridge_stats, detail) == 44, "bridge_stats.detail");
 static_assert(offsetof(bridge_stats, physics_step_us) == 48, "bridge_stats.physics_step_us");
+static_assert(offsetof(bridge_stats, frame_interval) == 52, "bridge_stats.frame_interval");
+static_assert(offsetof(bridge_stats, paced_skips) == 56, "bridge_stats.paced_skips");
 
 static_assert(sizeof(bridge_camera) == 48, "bridge_camera size");
 static_assert(sizeof(bridge_pose) == 32, "bridge_pose size");
