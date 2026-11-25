@@ -21,7 +21,6 @@
 //! Nothing on the per-frame path creates a JS object: every view is built once
 //! in [`Bridge::attach`] and reused.
 
-use std::collections::HashMap;
 use std::mem::offset_of;
 
 use bytemuck::{Pod, Zeroable};
@@ -71,22 +70,30 @@ mod header {
     pub const TIMING_STRIDE: u32 = 112;
 }
 
-/// Byte offsets inside `bridge_stats` of the fields the renderer owns.
+/// Byte offsets inside `bridge_stats`: the app's counters the stats report
+/// reads, and the fields the renderer owns.
 mod stats {
+    pub const STEP_WORK_US: u32 = 0;
     pub const FRAME_COUNT: u32 = 8;
     pub const FRAME_WORK_US: u32 = 12;
     pub const GPU_FRAME_US: u32 = 16;
     pub const GPU_FRAME_COUNT: u32 = 20;
+    pub const SOLVER_THREADS: u32 = 32;
     pub const FRAME_SPAN_US: u32 = 36;
     pub const APP_LATE: u32 = 40;
-    /// Written by the page: the `detail` bits below.
+    /// The `detail` bits below. The renderer writes them, from the groups
+    /// the page's stats panel has open (`stats-view`).
     pub const DETAIL: u32 = 44;
+    /// Written by the app: the part of `step_work_us` spent in Box3D's step.
+    pub const PHYSICS_STEP_US: u32 = 48;
 }
 
 /// `BRIDGE_DETAIL_*`: the breakdowns the page's stats panel is showing.
 mod detail {
+    pub const APP: u32 = 0x1;
     pub const RENDERER: u32 = 0x2;
     pub const GPU: u32 = 0x4;
+    pub const PHYSICS: u32 = 0x8;
 }
 
 /// Byte offsets in `bridge_timing`, the size of its name, and how many
@@ -100,14 +107,13 @@ mod timing {
     pub const APP_SLOTS: u32 = 24;
 }
 
-/// `BRIDGE_TIMING_*`: what an entry of the timing table measures.
+/// `BRIDGE_TIMING_*`: what an entry of the timing table measures. The
+/// renderer reads the app's entries; its own breakdowns go to the page in the
+/// stats report instead of the table (awsm-renderer-stats).
 mod timing_kind {
-    pub const RENDERER_PHASE: u32 = 2;
-    pub const RENDERER_PASS: u32 = 3;
-    pub const GPU_PASS: u32 = 4;
-    pub const RENDERER_PREP: u32 = 8;
-    pub const RENDERER_SUBMIT: u32 = 9;
-    pub const RENDERER_HOOK: u32 = 10;
+    pub const APP_PHASE: u32 = 1;
+    pub const PHYSICS_STAGE: u32 = 6;
+    pub const PHYSICS_SOLVE: u32 = 7;
 }
 
 /// Byte offsets inside `bridge_snapshot_header`.
@@ -461,6 +467,11 @@ pub struct Bridge {
     frame_span_us: u32,
     app_late: u32,
     detail: u32,
+    step_work_us: u32,
+    solver_threads: u32,
+    /// `None` for an app from before Box3D's share of the step was reported
+    /// (its stats section ends before `physics_step_us`).
+    physics_step_us: Option<u32>,
     /// Word indices of `frame_time_us` and `frame_time_valid`.
     frame_time_us: u32,
     frame_time_valid: u32,
@@ -471,39 +482,62 @@ pub struct Bridge {
     timings: TimingTable,
 }
 
-/// What the page's stats panel is showing a breakdown of
-/// (`bridge_stats.detail`).
+/// Which breakdowns the page's stats panel is showing
+/// (`bridge_stats.detail`): the app and Box3D time theirs only while asked.
 #[derive(Clone, Copy, Default)]
 pub struct Detail {
+    /// The app's step phases.
+    pub app: bool,
     /// The renderer's frame phases and its CPU time per pass.
     pub renderer: bool,
     /// GPU time per pass.
     pub gpu: bool,
+    /// The stages of Box3D's step.
+    pub physics: bool,
 }
 
-/// What an entry of the timing table measures (`BRIDGE_TIMING_*`).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TimingKind {
-    RendererPhase = timing_kind::RENDERER_PHASE as isize,
-    RendererPass = timing_kind::RENDERER_PASS as isize,
-    GpuPass = timing_kind::GPU_PASS as isize,
-    /// The rest of `render()`, by awsm-renderer's own kinds of scope.
-    RendererPrep = timing_kind::RENDERER_PREP as isize,
-    RendererSubmit = timing_kind::RENDERER_SUBMIT as isize,
-    RendererHook = timing_kind::RENDERER_HOOK as isize,
+/// What one of the app's timing-table entries measures (`BRIDGE_TIMING_*`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AppTimingKind {
+    /// A part of the app's step.
+    Phase,
+    /// A stage of Box3D's step.
+    PhysicsStage,
+    /// A part of Box3D's solve stage.
+    PhysicsSolve,
 }
 
-/// The renderer's part of the timing table: every entry after the app's.
+/// The app's entries of the timing table (the first `APP_SLOTS`), which the
+/// stats report reads.
 struct TimingTable {
     /// Word index of the table's first entry.
     first_word: u32,
     /// Words from one entry to the next.
     stride_words: u32,
     capacity: u32,
-    /// The next entry not yet given a name.
-    next: u32,
-    /// Which entry each named total lives in.
-    slots: HashMap<(TimingKind, &'static str), u32>,
+}
+
+/// One of the app's timing-table entries: a named running total over
+/// `count` steps, both wrapping at 2^32.
+pub struct AppTiming {
+    pub slot: u32,
+    pub kind: AppTimingKind,
+    pub name: String,
+    pub total_ns: u32,
+    pub count: u32,
+}
+
+/// The app's running totals in `bridge_stats` that the stats report reads.
+#[derive(Clone, Copy)]
+pub struct AppCounters {
+    /// Microseconds spent stepping (wraps).
+    pub step_work_us: u32,
+    /// The part of it inside Box3D's step (wraps; 0 from an older app).
+    pub physics_step_us: u32,
+    /// The newest step published.
+    pub latest_step: u32,
+    /// Threads Box3D steps the world on, counting the app's (0: not reported).
+    pub solver_threads: u32,
 }
 
 /// Where the snapshot ring is and how a snapshot is laid out.
@@ -783,6 +817,10 @@ impl Bridge {
             frame_span_us: (stats_offset + stats::FRAME_SPAN_US) / 4,
             app_late: (stats_offset + stats::APP_LATE) / 4,
             detail: (stats_offset + stats::DETAIL) / 4,
+            step_work_us: (stats_offset + stats::STEP_WORK_US) / 4,
+            solver_threads: (stats_offset + stats::SOLVER_THREADS) / 4,
+            physics_step_us: (stats_size >= stats::PHYSICS_STEP_US + 4)
+                .then_some((stats_offset + stats::PHYSICS_STEP_US) / 4),
             frame_time_us: header::FRAME_TIME_US / 4,
             frame_time_valid: header::FRAME_TIME_VALID / 4,
             snapshots,
@@ -792,8 +830,6 @@ impl Bridge {
                 first_word: timing_offset / 4,
                 stride_words: timing_stride / 4,
                 capacity: timing_capacity,
-                next: timing::APP_SLOTS,
-                slots: HashMap::new(),
             },
         })
     }
@@ -1051,54 +1087,62 @@ impl Bridge {
         store(&self.words, self.gpu_frame_count, frames);
     }
 
-    /// Which breakdowns the page's stats panel is showing right now.
-    pub fn detail(&self) -> Detail {
-        let bits = load(&self.words, self.detail);
-        Detail {
-            renderer: bits & detail::RENDERER != 0,
-            gpu: bits & detail::GPU != 0,
+    /// Tells the app which breakdowns the page's stats panel is showing. The
+    /// app times its step phases, and Box3D its stages, only while asked.
+    pub fn set_detail(&self, detail: Detail) {
+        let bit = |on: bool, bit: u32| if on { bit } else { 0 };
+        let bits = bit(detail.app, detail::APP)
+            | bit(detail.renderer, detail::RENDERER)
+            | bit(detail.gpu, detail::GPU)
+            | bit(detail.physics, detail::PHYSICS);
+        store(&self.words, self.detail, bits);
+    }
+
+    /// The app's running totals the stats report reads.
+    pub fn app_counters(&self) -> AppCounters {
+        AppCounters {
+            step_work_us: load(&self.words, self.step_work_us),
+            physics_step_us: self
+                .physics_step_us
+                .map_or(0, |word| load(&self.words, word)),
+            latest_step: self.latest_step(),
+            solver_threads: load(&self.words, self.solver_threads),
         }
     }
 
-    /// Publishes one named running total in the timing table: `total_ms` of
-    /// time over `count` frames, both since whenever the caller started
-    /// counting. The first call for a name claims an entry for it; once the
-    /// table is full, further names are left out.
-    pub fn publish_timing(
-        &mut self,
-        kind: TimingKind,
-        name: &'static str,
-        total_ms: f64,
-        count: u64,
-    ) {
-        let table = &mut self.timings;
-        let slot = match table.slots.get(&(kind, name)) {
-            Some(slot) => *slot,
-            None if table.next < table.capacity => {
-                let slot = table.next;
-                table.next += 1;
-                table.slots.insert((kind, name), slot);
-                // The name first, the kind last: a page that sees the kind
-                // sees the whole name. Cut to leave a final zero byte.
+    /// The app's entries of the timing table that are in use: its step
+    /// phases and Box3D's stages, named by the app.
+    pub fn app_timings(&self) -> Vec<AppTiming> {
+        let table = &self.timings;
+        (0..timing::APP_SLOTS.min(table.capacity))
+            .filter_map(|slot| {
                 let entry = table.first_word + slot * table.stride_words;
-                let mut bytes = [0u8; timing::NAME_SIZE as usize];
-                let length = name.len().min(bytes.len() - 1);
-                bytes[..length].copy_from_slice(&name.as_bytes()[..length]);
-                for (index, word) in (0u32..).zip(bytes.as_chunks::<4>().0) {
-                    let word = u32::from_le_bytes(*word);
-                    self.words
-                        .set_index(entry + timing::NAME / 4 + index, word as i32);
+                let kind = match load(&self.words, entry + timing::KIND / 4) {
+                    timing_kind::APP_PHASE => AppTimingKind::Phase,
+                    timing_kind::PHYSICS_STAGE => AppTimingKind::PhysicsStage,
+                    timing_kind::PHYSICS_SOLVE => AppTimingKind::PhysicsSolve,
+                    _ => return None,
+                };
+                // ASCII up to the first zero byte.
+                let mut name = Vec::with_capacity(timing::NAME_SIZE as usize);
+                'words: for index in 0..timing::NAME_SIZE / 4 {
+                    let word = load(&self.words, entry + timing::NAME / 4 + index);
+                    for byte in word.to_le_bytes() {
+                        if byte == 0 {
+                            break 'words;
+                        }
+                        name.push(byte);
+                    }
                 }
-                store(&self.words, entry + timing::KIND / 4, kind as u32);
-                slot
-            }
-            None => return,
-        };
-        let entry = table.first_word + slot * table.stride_words;
-        // Nanoseconds, wrapping like every running total in the block.
-        let total_ns = (total_ms * 1e6) as u64 as u32;
-        store(&self.words, entry + timing::TOTAL_NS / 4, total_ns);
-        store(&self.words, entry + timing::COUNT / 4, count as u32);
+                Some(AppTiming {
+                    slot,
+                    kind,
+                    name: String::from_utf8_lossy(&name).into_owned(),
+                    total_ns: load(&self.words, entry + timing::TOTAL_NS / 4),
+                    count: load(&self.words, entry + timing::COUNT / 4),
+                })
+            })
+            .collect()
     }
 }
 

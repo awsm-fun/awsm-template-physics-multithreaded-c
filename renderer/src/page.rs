@@ -1,9 +1,11 @@
 //! Messages from this worker to the page.
 //!
 //! These are the renderer's half of the `postMessage` contract. They are all
-//! rare (loading progress, one-off milestones, a Settings change being
-//! applied, failures); nothing that happens every frame goes through
-//! `postMessage` — that is what the bridge block is for.
+//! rare (loading progress, one-off milestones, failures); nothing that
+//! happens every frame goes through `postMessage` — that is what the bridge
+//! block is for. The Settings messages (`settings-options`, `aa-compile-*`)
+//! and the stats report (`stats`, about once a second) are
+//! awsm-renderer-kit's, posted with its `post_to_page` / `post_report`.
 
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::DedicatedWorkerGlobalScope;
@@ -11,21 +13,6 @@ use web_sys::DedicatedWorkerGlobalScope;
 /// `{type: 'progress', message}`: a line for the page's loading overlay.
 pub fn post_progress(message: &str) {
     post("progress", &[("message", message.into())]);
-}
-
-/// `{type: 'gpu-info', isFallback, maxTextureDim}`: what the page needs to
-/// size the canvas. A software ("fallback") adapter cannot push many pixels,
-/// so the page starts it at a lower resolution; and the backing store can be
-/// no larger than the GPU's largest 2D texture. Posted once, at start-up,
-/// before the scene loads.
-pub fn post_gpu_info(is_fallback: bool, max_texture_dim: u32) {
-    post(
-        "gpu-info",
-        &[
-            ("isFallback", is_fallback.into()),
-            ("maxTextureDim", max_texture_dim.into()),
-        ],
-    );
 }
 
 /// `{type: 'ready'}`: the scene is on screen (after start-up, and again after
@@ -39,27 +26,6 @@ pub fn post_ready() {
 /// `progress` lines that follow, and hides it on the next `ready`.
 pub fn post_loading() {
     post("loading", &[]);
-}
-
-/// `{type: 'aa-compile-start', msaa, smaa}`: an anti-aliasing change from the
-/// page's Settings is being applied, which recompiles render pipelines. The
-/// page shows a "compiling pipelines" overlay until `aa-compile-done`.
-pub fn post_aa_compile_start(msaa: bool, smaa: bool) {
-    post(
-        "aa-compile-start",
-        &[("msaa", msaa.into()), ("smaa", smaa.into())],
-    );
-}
-
-/// `{type: 'aa-compile-progress', message}`: a progress line for that overlay.
-pub fn post_aa_compile_progress(message: &str) {
-    post("aa-compile-progress", &[("message", message.into())]);
-}
-
-/// `{type: 'aa-compile-done'}`: the change is finished, whether it worked or
-/// not (a failure also posts an `error`).
-pub fn post_aa_compile_done() {
-    post("aa-compile-done", &[]);
 }
 
 /// `{type: 'error', message}`: something failed. Also logged to the console,

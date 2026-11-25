@@ -60,7 +60,7 @@ export const LAYOUT = {
     solver_threads: 32,
     frame_span_us: 36,
     app_late: 40,
-    detail: 44, // written by this page: the `detail` bits below
+    detail: 44, // written by the renderer: the `detail` bits below
     physics_step_us: 48,
     frame_interval: 52,
     paced_skips: 56,

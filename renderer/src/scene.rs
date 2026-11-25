@@ -17,9 +17,10 @@ use awsm_renderer::materials::MaterialKey;
 use awsm_renderer::meshes::MeshKey;
 use awsm_renderer::transforms::{Transform, TransformKey};
 use awsm_renderer::AwsmRenderer;
-use awsm_renderer_scene::{AntiAliasingConfig, ColliderShape, EditorNode, NodeId, NodeKind, Trs};
+use awsm_renderer_scene::{ColliderShape, EditorNode, NodeId, NodeKind, Trs};
 use awsm_renderer_scene_loader::assets::HttpAssets;
 use awsm_renderer_scene_loader::{load_scene_for_player, LoadedScene, ParticleDriver};
+use awsm_renderer_settings::scene_anti_aliasing;
 use glam::{Mat4, Quat, Vec3};
 
 use crate::bridge::{bridge_hash, Collider, Shape};
@@ -116,10 +117,7 @@ pub async fn load(renderer: &mut AwsmRenderer, base_url: &str) -> Result<SceneIn
     // already runs it. The loader applies the scene's authored anti-aliasing,
     // so the scene is given the renderer's: the loader then changes nothing,
     // and nothing is compiled for a mode this session does not use.
-    scene.post_process.anti_aliasing = AntiAliasingConfig {
-        msaa: renderer.anti_aliasing.msaa_sample_count.is_some(),
-        smaa: renderer.anti_aliasing.smaa,
-    };
+    scene.post_process.anti_aliasing = scene_anti_aliasing(&renderer.anti_aliasing);
 
     // The loader asks for bundle-relative paths (`assets/<id>.png`, …) and
     // this fetches them from next to `scene.toml`.

@@ -26,13 +26,16 @@
 //! * [`scene`] — loading the scene, its colliders and its addressable nodes.
 //! * [`slots`] — what each pose slot drives (bind / spawn / despawn).
 //! * [`camera`] — the app's camera, as the renderer wants it.
+//! * [`stats`] — the stats panel's frame phases, and the app's and Box3D's
+//!   groups.
 //! * [`page`] — messages to the page.
 //!
-//! Besides drawing, it reports to the page's stats panel through the bridge
-//! block (frame and GPU time, the time between frames, frames the app was
-//! late for)
-//! and applies the page's Settings: resolution arrives as an ordinary
-//! `resize`, anti-aliasing as `anti-alias`.
+//! Besides drawing, it measures for the page's stats panel and posts it a
+//! report about once a second (the app's and Box3D's figures too, read from
+//! the bridge block), and applies the page's Settings: resolution arrives as
+//! an ordinary `resize`, anti-aliasing as `anti-alias`. The Settings and the
+//! stats are the shared awsm-renderer-kit (`awsm-renderer-settings`,
+//! `awsm-renderer-stats`; the page runs its JS twins from `dom/runtime/kit/`).
 //!
 //! # Entry points
 //!
@@ -43,10 +46,10 @@
 mod bridge;
 mod camera;
 mod page;
-mod profile;
 mod render;
 mod scene;
 mod slots;
+mod stats;
 
 use wasm_bindgen::prelude::*;
 use web_sys::OffscreenCanvas;
@@ -60,27 +63,22 @@ pub fn start() {
         page::post_error(&format!("the renderer panicked: {info}"));
     }));
     install_tracing();
+    // The GPU probe and the Settings options, which the page waits for
+    // before it sends `init`.
+    render::start();
 }
 
-/// `{type: 'init', canvas, baseUrl, width, height, msaa, smaa}`. `msaa` and
-/// `smaa` are the anti-aliasing the page's Settings ask for, so the renderer
-/// is built with it rather than switching right after start-up.
+/// `{type: 'init', canvas, baseUrl, width, height, aa}`. `aa` is the
+/// anti-aliasing mode the page's Settings ask for (an id such as `"taa"`),
+/// so the renderer is built with it rather than switching right after
+/// start-up.
 #[wasm_bindgen]
-pub fn init(
-    canvas: OffscreenCanvas,
-    base_url: String,
-    width: u32,
-    height: u32,
-    msaa: bool,
-    smaa: bool,
-) {
-    render::init(
-        canvas,
-        base_url,
-        width,
-        height,
-        render::AntiAliasMode { msaa, smaa },
-    );
+pub fn init(canvas: OffscreenCanvas, base_url: String, width: u32, height: u32, aa: String) {
+    let Some(aa) = awsm_renderer_settings::AaMode::from_id(&aa) else {
+        page::post_error(&format!("init: unknown anti-aliasing mode {aa:?}"));
+        return;
+    };
+    render::init(canvas, base_url, width, height, aa);
 }
 
 /// `{type: 'resize', width, height}`.
@@ -89,11 +87,12 @@ pub fn resize(width: u32, height: u32) {
     render::resize(width, height);
 }
 
-/// `{type: 'anti-alias', msaa, smaa}`: the user changed anti-aliasing in the
-/// page's Settings.
-#[wasm_bindgen(js_name = antiAlias)]
-pub fn anti_alias(msaa: bool, smaa: bool) {
-    render::anti_alias(render::AntiAliasMode { msaa, smaa });
+/// The kit's page messages, passed on whole: `{type: 'anti-alias', mode}`
+/// (the user changed anti-aliasing in the page's Settings), and the stats
+/// panel's `{type: 'stats-view', …}` and `{type: 'stats-page', …}`.
+#[wasm_bindgen]
+pub fn kit(message: JsValue) {
+    render::kit_message(message);
 }
 
 /// `{type: 'attach', memory, bridgePtr}`.

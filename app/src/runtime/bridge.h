@@ -282,9 +282,10 @@ typedef struct bridge_stats {
     // late: its burst did not finish within a frame).
     _Atomic uint32_t app_late; // 40  frames (wraps)
 
-    // Written by the PAGE: which breakdowns its stats panel is showing right
-    // now (BRIDGE_DETAIL_* bits). The app and the renderer only spend time
-    // measuring the detail that is asked for; this is not a running total.
+    // Written by the renderer: which breakdowns the page's stats panel is
+    // showing right now (BRIDGE_DETAIL_* bits; the page tells the renderer
+    // which groups are open). The app only spends time measuring the detail
+    // that is asked for; this is not a running total.
     _Atomic uint32_t detail; // 44
 
     // Written by the app: the part of step_work_us spent inside Box3D's step

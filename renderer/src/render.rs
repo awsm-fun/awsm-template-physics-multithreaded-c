@@ -3,7 +3,7 @@
 //!
 //! Everything here runs on one thread, entered in four ways:
 //!
-//! * a message from the page ([`init`], [`resize`], [`anti_alias`],
+//! * a message from the page ([`init`], [`resize`], [`kit_message`],
 //!   [`attach`], [`detach`]);
 //! * the asynchronous start-up that `init` kicks off ([`App::boot`]);
 //! * the `requestAnimationFrame` callback ([`on_frame`]), once start-up is
@@ -20,55 +20,34 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
-use awsm_renderer::anti_alias::AntiAliasing;
 use awsm_renderer::core::renderer::{AwsmRendererWebGpuBuilder, DeviceRequestLimits};
-use awsm_renderer::debug::{AwsmRendererLogging, TimingTier};
 use awsm_renderer::web_global;
 use awsm_renderer::{AwsmRenderer, AwsmRendererBuilder, RendererLoadingPhase};
 use awsm_renderer_scene_loader::basis::{configure, BasisWorkerConfig};
+use awsm_renderer_settings::{
+    apply_anti_aliasing, post_to_page, probe_gpu, AaMode, SettingsConfig, SettingsOptions,
+    SettingsToPage, SettingsToWorker,
+};
+use awsm_renderer_stats::{
+    post_report, stats_logging, FrameInput, RendererTimings, StatsCollector, StatsToWorker,
+};
 use js_sys::SharedArrayBuffer;
 use wasm_bindgen::prelude::*;
-use web_sys::{DedicatedWorkerGlobalScope, GpuAdapter, OffscreenCanvas};
+use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
 
 use crate::bridge::{self, Bridge, Command, Record};
 use crate::camera;
 use crate::page;
-use crate::profile::{Phase, Profile};
 use crate::scene::{self, SceneIndex};
 use crate::slots::{self, Slots};
-
-/// The anti-aliasing the page's Settings ask for. The page offers Off, SMAA
-/// and 4× MSAA, never both at once: on top of an MSAA resolve SMAA gains
-/// little, and it costs a full-screen pass of its own. It is the cheap option
-/// for when MSAA is too expensive.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AntiAliasMode {
-    pub msaa: bool,
-    pub smaa: bool,
-}
-
-impl AntiAliasMode {
-    /// The renderer's configuration for this mode. 4 is the only MSAA sample
-    /// count the renderer supports; mipmapping is always on.
-    fn config(self) -> AntiAliasing {
-        AntiAliasing {
-            msaa_sample_count: self.msaa.then_some(4),
-            smaa: self.smaa,
-            mipmap: true,
-        }
-    }
-}
-
-/// WebGPU guarantees every device at least this largest 2D texture size. It is
-/// what the page is told when the adapter cannot be asked.
-const MIN_MAX_TEXTURE_DIMENSION_2D: u32 = 8192;
+use crate::stats::{self, AppStats, Phase};
 
 /// The awsm-renderer release the vendored Basis transcoder files came with.
 /// It is appended to their URLs as `?v=…`: those files keep their names from
 /// one release to the next, so after a deployed upgrade a browser could
 /// otherwise pair a cached old transcoder with the new worker script. Bump it
 /// together with the awsm-renderer version in Cargo.toml.
-const BASIS_VERSION: &str = "0.45.0";
+const BASIS_VERSION: &str = "0.46.0";
 
 /// Frames drawn before the page is told the scene is on screen. The very
 /// first frames after a load still have uploads settling; this is when the
@@ -84,7 +63,7 @@ struct State {
     /// The latest `attach` that has not been acted on yet.
     pending_attach: Option<AttachRequest>,
     /// The latest anti-aliasing change that has not been applied yet.
-    pending_anti_alias: Option<AntiAliasMode>,
+    pending_anti_alias: Option<AaMode>,
     /// Set while a [`Job`] is running. `app` is `None` for that time: the job
     /// owns the renderer across its awaits.
     busy: bool,
@@ -100,7 +79,7 @@ struct State {
 /// drawn frames, waits too.
 enum Job {
     /// The page's Settings changed the anti-aliasing: recompile pipelines.
-    AntiAlias(AntiAliasMode),
+    AntiAlias(AaMode),
     /// The app asked for the whole scene to be loaded again.
     ReloadScene,
 }
@@ -122,6 +101,40 @@ thread_local! {
     /// in a worker on every call, which costs a caught exception per frame
     /// here. This module always runs in a dedicated worker.)
     static WORKER_SCOPE: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
+
+    /// The stats panel's numbers (awsm-renderer-stats), from the module's
+    /// start: the page's `stats-view` and `stats-page` can arrive before the
+    /// renderer exists.
+    static STATS: RefCell<StatsCollector> = RefCell::new(StatsCollector::new(stats::config()));
+}
+
+/// The Settings this project offers: every anti-aliasing mode, TAA by
+/// default on a desktop and Off on a touch device or a software GPU, and the
+/// shared resolution policy (awsm-renderer-settings).
+fn settings_config() -> SettingsConfig {
+    SettingsConfig::default()
+}
+
+/// Runs once, when the module starts: asks the GPU what the page needs to
+/// size the canvas and pick the defaults, then posts `settings-options`
+/// (the menu, the defaults, the resolution policy and that GPU probe) and
+/// the stats panel's "starting…" report. The page sends `init` once it has
+/// the options. The probe is a separate, lightweight adapter request, made
+/// before the renderer builds its own device.
+pub fn start() {
+    wasm_bindgen_futures::spawn_local(async {
+        let gpu = probe_gpu().await;
+        tracing::info!(
+            "gpu: fallback adapter {}, largest 2D texture {}",
+            gpu.is_fallback,
+            gpu.max_texture_dim
+        );
+        post_to_page(&SettingsToPage::SettingsOptions(SettingsOptions::new(
+            &settings_config(),
+            Some(gpu),
+        )));
+        post_report(STATS.with_borrow(StatsCollector::placeholder));
+    });
 }
 
 /// `{type: 'init'}`: start rendering to `canvas`. `base_url` is the absolute
@@ -132,7 +145,7 @@ pub fn init(
     base_url: String,
     width: u32,
     height: u32,
-    anti_alias: AntiAliasMode,
+    anti_alias: AaMode,
 ) {
     let first = STATE.with(|state| {
         let mut state = state.borrow_mut();
@@ -187,11 +200,27 @@ pub fn resize(width: u32, height: u32) {
     });
 }
 
-/// `{type: 'anti-alias'}`: the page's Settings changed the anti-aliasing. It
-/// is applied by the next frame (or once start-up has finished); a newer
-/// change replaces one that has not been applied yet.
-pub fn anti_alias(mode: AntiAliasMode) {
-    STATE.with(|state| state.borrow_mut().pending_anti_alias = Some(mode));
+/// The kit's messages from the page: `anti-alias` (the page's Settings
+/// changed the mode; applied by the next frame, or once start-up has
+/// finished, and a newer change replaces one not applied yet), and the stats
+/// panel's `stats-view` and `stats-page`. Anything else is reported.
+pub fn kit_message(message: JsValue) {
+    if let Some(parsed) = SettingsToWorker::from_js(&message) {
+        match parsed {
+            Ok(SettingsToWorker::AntiAlias { mode }) => {
+                STATE.with(|state| state.borrow_mut().pending_anti_alias = Some(mode));
+            }
+            Ok(SettingsToWorker::Resize { width, height }) => resize(width, height),
+            Err(err) => page::post_error(&format!("a settings message did not parse: {err}")),
+        }
+    } else if let Some(parsed) = StatsToWorker::from_js(&message) {
+        match parsed {
+            Ok(message) => STATS.with_borrow_mut(|stats| stats.handle(message)),
+            Err(err) => page::post_error(&format!("a stats message did not parse: {err}")),
+        }
+    } else {
+        tracing::warn!("render worker: ignoring an unknown kit message {message:?}");
+    }
 }
 
 /// `{type: 'attach'}`: an app instance is running; its bridge block is at
@@ -249,7 +278,9 @@ fn on_frame(frame_ms: f64) {
         // scene reload is something the app asks for during one.
         let job = match pending_anti_alias.take() {
             Some(mode) => Job::AntiAlias(mode),
-            None => running.frame(frame_ms, pending_attach)?,
+            None => {
+                STATS.with_borrow_mut(|stats| running.frame(frame_ms, pending_attach, stats))?
+            }
         };
         *busy = true;
         app.take().map(|app| (app, job))
@@ -281,29 +312,6 @@ async fn run_job(mut app: App, job: Job) {
         state.busy = false;
         state.app = Some(app);
     });
-}
-
-/// Asks the GPU the two things the page needs to size the canvas, and posts
-/// them: whether the adapter is a software fallback, and its largest 2D
-/// texture. This is a separate, lightweight adapter request, made before the
-/// renderer builds its own device. If it fails, the page gets the safe
-/// defaults (not a fallback, the minimum every WebGPU device supports).
-async fn report_gpu_info(gpu: &web_sys::Gpu) {
-    let adapter = gpu
-        .request_adapter()
-        .await
-        .ok()
-        .filter(|adapter| !adapter.is_null() && !adapter.is_undefined())
-        .map(|adapter| adapter.unchecked_into::<GpuAdapter>());
-    let (is_fallback, max_texture_dim) = match adapter {
-        Some(adapter) => (
-            adapter.info().is_fallback_adapter(),
-            adapter.limits().max_texture_dimension_2d(),
-        ),
-        None => (false, MIN_MAX_TEXTURE_DIMENSION_2D),
-    };
-    tracing::info!("gpu: fallback adapter {is_fallback}, largest 2D texture {max_texture_dim}");
-    page::post_gpu_info(is_fallback, max_texture_dim);
 }
 
 /// The running renderer and everything that feeds it.
@@ -341,8 +349,8 @@ struct App {
     /// bridge. Timestamp readbacks arrive a few frames late, so the totals are
     /// only written when a new sample has come in.
     gpu_samples_published: Option<u64>,
-    /// The breakdowns the page's stats panel asks for (see [`Profile`]).
-    profile: Profile,
+    /// The C app's and Box3D's groups of the stats report (see [`AppStats`]).
+    app_stats: AppStats,
     /// The previous frame's `requestAnimationFrame` timestamp, for the frame
     /// span the page's stats panel turns into missed frames.
     last_frame_ms: Option<f64>,
@@ -359,7 +367,7 @@ impl App {
     async fn boot(
         canvas: OffscreenCanvas,
         base_url: String,
-        anti_alias: AntiAliasMode,
+        anti_alias: AaMode,
     ) -> Result<Self, String> {
         let gpu = web_global::navigator_gpu()
             .ok_or("WebGPU is not available in this browser (the worker has no navigator.gpu)")?;
@@ -375,21 +383,16 @@ impl App {
         ));
 
         page::post_progress("render worker: requesting WebGPU device…");
-        // First, so the page can settle the canvas size before the slow part.
-        report_gpu_info(&gpu).await;
         let gpu_builder = AwsmRendererWebGpuBuilder::new_with_offscreen_canvas(gpu, canvas)
             .with_device_request_limits(DeviceRequestLimits::max_all());
         let mut renderer = AwsmRendererBuilder::new(gpu_builder)
             // Built with the page's anti-aliasing from the start, so start-up
             // compiles exactly the pipelines this session uses.
-            .with_anti_aliasing(anti_alias.config())
+            .with_anti_aliasing(anti_alias.to_anti_aliasing())
             // GPU timestamp queries, folded into one whole-frame time for the
             // page's stats panel ("gpu time"). Cheap, and silently off on a
             // device without `timestamp-query`.
-            .with_logging(AwsmRendererLogging {
-                gpu: TimingTier::Frame,
-                ..Default::default()
-            })
+            .with_logging(stats_logging())
             .with_phase_handler(|phase| {
                 if matches!(phase, RendererLoadingPhase::Init) {
                     page::post_progress("renderer init: GPU device + core resources…");
@@ -399,8 +402,8 @@ impl App {
             .await
             .map_err(|err| format!("could not create the renderer: {err}"))?;
         page::post_progress(&format!(
-            "render worker: WebGPU device + renderer ready (msaa {}, smaa {})",
-            anti_alias.msaa, anti_alias.smaa
+            "render worker: WebGPU device + renderer ready (anti-aliasing: {})",
+            AaMode::from_anti_aliasing(&renderer.anti_aliasing).label()
         ));
 
         let scene = scene::load(&mut renderer, &base_url).await?;
@@ -420,7 +423,7 @@ impl App {
             camera: camera::STARTUP,
             frames_drawn: 0,
             gpu_samples_published: None,
-            profile: Profile::default(),
+            app_stats: AppStats::default(),
             last_frame_ms: None,
             render_failing: false,
             animation_failing: false,
@@ -430,13 +433,21 @@ impl App {
 
     /// One display frame. Returns the job the app asked for during it, if
     /// any: a scene reload.
-    fn frame(&mut self, frame_ms: f64, pending_attach: &mut Option<AttachRequest>) -> Option<Job> {
+    fn frame(
+        &mut self,
+        frame_ms: f64,
+        pending_attach: &mut Option<AttachRequest>,
+        stats: &mut StatsCollector,
+    ) -> Option<Job> {
         let work_start = self.performance.now();
 
         // The app is told about the scene only once the scene is on screen.
         if self.frames_drawn >= FRAMES_BEFORE_READY {
             if let Some(request) = pending_attach.take() {
                 self.attach(request);
+                // A new app's counters start from zero: the stats start over.
+                self.app_stats.reset();
+                post_report(stats.restart());
             }
         }
 
@@ -447,10 +458,16 @@ impl App {
         // published by now unless the app is late. Fixed before the app is
         // woken below, so its next burst cannot move it.
         let mut display_us = None;
-        // Phase timing for the stats panel, only while it asks (profile.rs).
-        self.profile
-            .begin_frame(&mut self.renderer, self.bridge.as_ref());
-        let mut lap_ms = work_start;
+        // Phase timing for the stats panel, only while it shows the
+        // renderer's breakdown (awsm-renderer-stats).
+        stats.begin_renderer_frame(&mut self.renderer, work_start);
+        let timing = stats.renderer_detail();
+        let performance = self.performance.clone();
+        let lap = |stats: &mut StatsCollector, phase: Phase| {
+            if timing {
+                stats.lap(phase as usize, performance.now());
+            }
+        };
         let mut late = false;
         let mut job = None;
         if let Some(bridge) = self.bridge.as_ref() {
@@ -468,12 +485,12 @@ impl App {
         // The scene's own motion, by the real time since the previous frame.
         // Before the app's commands and poses below, so on a node the app
         // drives, the app's pose is the one drawn.
-        lap_ms = self.profile.lap(Phase::ReadApp, &self.performance, lap_ms);
+        lap(stats, Phase::ReadApp);
         let dt_ms = self
             .last_frame_ms
             .map_or(0.0, |last| (frame_ms - last).max(0.0));
         self.animate(dt_ms);
-        lap_ms = self.profile.lap(Phase::Animate, &self.performance, lap_ms);
+        lap(stats, Phase::Animate);
 
         if let Some(bridge) = self.bridge.as_mut() {
             // Hand over as much of the scene description as the ring takes.
@@ -565,31 +582,29 @@ impl App {
         // The camera is set every frame, even when it has not moved: this is
         // where the renderer picks up the surface's current aspect ratio.
         let (view, params) = camera::to_renderer(&self.camera);
-        lap_ms = self.profile.lap(Phase::ReadApp, &self.performance, lap_ms);
+        lap(stats, Phase::ReadApp);
         let camera_set = self
             .renderer
             .set_camera(view, params)
             .map_err(|err| err.to_string());
-        lap_ms = self
-            .profile
-            .lap(Phase::SetCamera, &self.performance, lap_ms);
+        lap(stats, Phase::SetCamera);
         let drawn = camera_set.and_then(|()| {
             // Resolves the transforms written above into world matrices
             // and refreshes everything derived from them (bounds, culling,
             // light and shadow bookkeeping).
             self.renderer.update_transforms();
-            lap_ms = self
-                .profile
-                .lap(Phase::UpdateTransforms, &self.performance, lap_ms);
+            lap(stats, Phase::UpdateTransforms);
             self.renderer.render(None).map_err(|err| err.to_string())
         });
-        self.profile.lap(Phase::Render, &self.performance, lap_ms);
+        lap(stats, Phase::Render);
         match drawn {
             Ok(()) => {
                 self.render_failing = false;
                 self.frames_drawn = self.frames_drawn.saturating_add(1);
                 if self.frames_drawn == FRAMES_BEFORE_READY {
                     page::post_ready();
+                    // The scene is on screen: the stats warm up from here.
+                    post_report(stats.mark_ready());
                 }
             }
             Err(message) => {
@@ -602,9 +617,11 @@ impl App {
 
         // The frame's stats. (The app was already woken at the start of the
         // frame, whether or not the frame could be drawn: a rendering problem
-        // should not also freeze the simulation.)
+        // should not also freeze the simulation.) The bridge block's renderer
+        // counters stay up to date for anything that reads them; the stats
+        // panel gets its numbers from the report below.
+        let work_ms = self.performance.now() - work_start;
         if let Some(bridge) = self.bridge.as_mut() {
-            self.profile.end_frame(bridge, frame_ms);
             if let Some(gpu) = awsm_renderer::profiling::gpu_frame_timing() {
                 if self.gpu_samples_published != Some(gpu.count) {
                     self.gpu_samples_published = Some(gpu.count);
@@ -612,7 +629,7 @@ impl App {
                     bridge.set_gpu_totals((gpu.total_ms * 1000.0) as u64 as u32, gpu.count as u32);
                 }
             }
-            let work_us = (self.performance.now() - work_start) * 1000.0;
+            let work_us = work_ms * 1000.0;
             // Rounded per frame; the page divides whole seconds of these by a
             // refresh period, so sub-microsecond loss does not matter.
             let span_us = self
@@ -623,6 +640,21 @@ impl App {
                 span_us.clamp(0.0, u32::MAX as f64) as u32,
                 late,
             );
+        }
+        let input = FrameInput {
+            late,
+            ..FrameInput::new(frame_ms, work_ms)
+        };
+        if let Some(window) = stats.end_frame(input, &RendererTimings) {
+            let sections = self
+                .app_stats
+                .sections(stats, &window, self.bridge.as_ref());
+            post_report(stats.report(&window, sections));
+        }
+        // The app times its phases, and Box3D its stages, only while their
+        // groups are open.
+        if let Some(bridge) = self.bridge.as_ref() {
+            bridge.set_detail(stats::detail(stats));
         }
         self.last_frame_ms = Some(frame_ms);
         job
@@ -688,41 +720,18 @@ impl App {
 
     /// [`Job::AntiAlias`]: applies an anti-aliasing change. Only the first
     /// switch to a given mode really compiles anything; the renderer keeps the
-    /// pipelines of modes it has used, so switching back is quick.
-    async fn apply_anti_aliasing(&mut self, mode: AntiAliasMode) {
-        page::post_aa_compile_start(mode.msaa, mode.smaa);
-        let applied = match self.renderer.set_anti_aliasing(mode.config()).await {
-            // Changing the configuration only marks what has to be rebuilt;
-            // the compiling happens in `commit_load`, whose progress the page
-            // shows.
-            Ok(()) => {
-                let mut last_line = String::new();
-                self.renderer
-                    .commit_load(|stats| {
-                        let Some(line) = stats.phase_label() else {
-                            return;
-                        };
-                        if line != last_line {
-                            page::post_aa_compile_progress(&line);
-                            last_line = line;
-                        }
-                    })
-                    .await
-                    .map(|_| ())
-                    .map_err(|err| format!("anti-aliasing pipelines: {err}"))
-            }
-            Err(err) => Err(format!("anti-aliasing change: {err}")),
-        };
+    /// pipelines of modes it has used, so switching back is quick. The page
+    /// shows its "compiling pipelines" overlay from the `aa-compile-*`
+    /// messages (`aa-compile-done` is always posted).
+    async fn apply_anti_aliasing(&mut self, mode: AaMode) {
+        let applied = apply_anti_aliasing(&mut self.renderer, mode, |event| {
+            post_to_page(&SettingsToPage::from(event));
+        })
+        .await;
         match applied {
-            Ok(()) => tracing::info!(
-                "anti-aliasing applied (msaa {}, smaa {})",
-                mode.msaa,
-                mode.smaa
-            ),
+            Ok(()) => tracing::info!("anti-aliasing applied: {}", mode.label()),
             Err(message) => page::post_error(&message),
         }
-        // Always, even after a failure: the page lowers its overlay on this.
-        page::post_aa_compile_done();
     }
 
     /// [`Job::ReloadScene`]: throws the whole scene away and loads it again
@@ -731,6 +740,8 @@ impl App {
     /// and the app gets a fresh description (BEGIN with `used` false).
     async fn reload_scene(&mut self) {
         page::post_loading();
+        // Nothing is counted until the scene is back on screen.
+        post_report(STATS.with_borrow_mut(StatsCollector::reset));
         page::post_progress("reloading the scene…");
         if let Err(message) = self.replace_scene().await {
             page::post_error(&format!("reloading the scene failed: {message}"));
