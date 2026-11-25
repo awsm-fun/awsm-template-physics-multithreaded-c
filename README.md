@@ -91,10 +91,17 @@ Over the canvas: the controls, whether sound is on and a status line (top
 left); a **Stats** panel (bottom-left button, described below); **About** (bottom
 centre), which says what the demo is and, on a second tab, explains every
 number in the Stats panel; and **Settings** (bottom right): the render resolution and the
-anti-aliasing (Off, SMAA, 4× MSAA). The resolution starts at native, held to
-a budget of 2.8 million pixels (so a big high-DPI window starts below 100%);
-touch devices and software GPUs start lower. Choices are remembered in
-`localStorage` and always win; `?reset` in the URL forgets them. The storage
+anti-aliasing (Off, SMAA, 4× MSAA, TAA, or TAA upscaling from 67%, 58% or 50%
+of the width and height). TAA is the default on a desktop. The resolution
+starts at native, held to a budget of 2.8 million pixels (so a big high-DPI
+window starts below 100%); touch devices and software GPUs start lower, and
+with anti-aliasing off. Choices are remembered in `localStorage` and always
+win; `?reset` in the URL forgets them, and `?aa=<mode>` (`taa-quality`,
+`msaa`, …) tries a mode for one visit. The Settings and the Stats panel are
+[awsm-renderer-kit](https://github.com/awsm-fun/awsm-renderer-kit)'s, shared
+by every awsm-renderer app: its Rust crates in the renderer, and its JS twins
+in `dom/runtime/kit/` (synced copies; update them with the kit's
+`scripts/sync-js.sh`, never by hand). The storage
 keys share one prefix (`STORAGE_PREFIX` in `dom/game.js`): change it for
 your own project, since everything on the same origin shares `localStorage`.
 
@@ -113,8 +120,13 @@ what it is per:
 | page (main thread) | the main thread's work per frame | |
 
 A header toggles its group, and the choice is remembered. The breakdowns are
-only measured while their group is open (`renderer/src/profile.rs`, "Timing"
-in `app/src/runtime/runtime.c`), so a collapsed panel costs nothing extra.
+only measured while their group is open (the render worker hears which are
+open, and tells the app in the bridge block: "Timing" in
+`app/src/runtime/runtime.c`), so a collapsed panel costs nothing extra. The
+render worker measures and formats every number, the app's and Box3D's
+included (`renderer/src/stats.rs`, from the bridge block's counters), and
+posts the panel a report about once a second; the page adds the game's rows
+(`gameStatsRows` in `dom/game.js`) and the last cue.
 
 CPU and GPU work run in parallel, so each must fit the frame budget on its
 own; they do not add up, except when the CPU waits on the GPU, which shows as
@@ -199,7 +211,10 @@ and the page forwards both to the renderer (`attach`). After that it carries
 only rare messages: a new canvas size (`resize`, also how the resolution
 setting is applied), an anti-aliasing change (`anti-alias`), and the
 renderer's progress back while it recompiles for one or loads the scene again
-(`loading`, `progress`, `ready`). Nothing per-frame goes through
+(`loading`, `progress`, `ready`). The stats panel is the one regular
+exception: the render worker posts it a report about once a second
+(`stats`), and the page sends back which groups are open and its own frame
+times (`stats-view`, `stats-page`). Nothing per-frame goes through
 `postMessage`.
 
 ### Directory layout
@@ -234,13 +249,15 @@ renderer/             the Rust crate (cdylib), built with cargo + wasm-bindgen +
   src/render.rs       start-up, frame loop, attach / detach
   src/scene.rs        loads the scene bundle, reports colliders, indexes drivable nodes
   src/slots.rs        what each pose slot drives (bind / spawn / despawn)
+  src/stats.rs        the stats panel's phases, the app's and Box3D's groups
   web/worker.js       the worker script that loads the wasm-bindgen output
   vendored/           Basis Universal transcoder and its worker (decodes the KTX2 textures)
 dom/                  the page
   index.html          the page shell (YOURS: title and About text)
   game.js             YOUR GAME: name, keys, HUD words, what each cue sounds like
   runtime/            RUNTIME: main.js, bridge.js (mirror of bridge.h), style.css,
-                      and the panels: settings.js, stats.js, about.js, loading.js, modal.js
+                      and the panels: about.js, loading.js, modal.js;
+                      kit/: Settings and Stats, awsm-renderer-kit's JS twins
 media/bundle/         the scene: scene.toml + assets/ (KTX2 textures)
 media/audio/          the sounds: an awsm-audio export (project.toml + assets/)
 tools/                dev-server.mjs (dev server), check-bridge.mjs (mirror check),
