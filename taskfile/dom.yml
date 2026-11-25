@@ -32,6 +32,30 @@ tasks:
       # As modules: checked as plain scripts, node gives up at the first
       # `import` without looking at the rest of the file.
       - |
-        for file in dom/*.js dom/runtime/*.js; do
+        for file in dom/*.js dom/runtime/*.js dom/runtime/kit/*.js; do
           node --input-type=module --check < "$file" || { echo "dom:check: syntax error in $file"; exit 1; }
         done
+      - task: kit-check
+
+  kit-check:
+    desc: 'Check that dom/runtime/kit/ holds the JS of the awsm-renderer-kit tag renderer/Cargo.toml pins (fetches that tag; KIT=<checkout> checks against a local checkout instead)'
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      KIT: '{{.KIT | default ""}}'
+    cmds:
+      # The page's copies of the kit's JS must match the kit the renderer is
+      # built with: the two speak one protocol. Update them with the kit's
+      # scripts/sync-js.sh after changing the tag.
+      - |
+        tag=$(sed -n 's/^awsm-renderer-settings = .*tag = "\([^"]*\)".*/\1/p' renderer/Cargo.toml)
+        [ -n "$tag" ] || { echo "dom:kit-check: no awsm-renderer-kit tag in renderer/Cargo.toml"; exit 1; }
+        kit="{{.KIT}}"
+        if [ -z "$kit" ]; then
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir "$tmp/kit"
+          curl -fsSL -o "$tmp/kit.tar.gz" "https://codeload.github.com/awsm-fun/awsm-renderer-kit/tar.gz/refs/tags/$tag"
+          tar -xzf "$tmp/kit.tar.gz" --strip-components=1 -C "$tmp/kit"
+          kit="$tmp/kit"
+        fi
+        "$kit/scripts/sync-js.sh" . --check
